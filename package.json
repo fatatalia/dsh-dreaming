@@ -1,0 +1,39 @@
+{
+  "name": "dsh-dreaming",
+  "version": "0.1.0",
+  "private": true,
+  "description": "dsh 梦境记忆整合插件：凌晨随机触发，把当天会话/Hindsight 记忆生成叙事化梦境日记（法塔人格），高价值洞察晋升回 MEMORY.md，梦境与晋升记录存 SQLite 并在 web 梦境 Tab 展示。",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "lib",
+    "cordis.patch.yml"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "react": "^18.2.0",
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.1.0-rc.6",
+    "@deepseek-ai/schemastery": ">=3.18.0"
+  }
+}

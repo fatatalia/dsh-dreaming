@@ -1,0 +1,5 @@
+# dsh-dreaming bundle patch
+# 插入 host 插件行：梦境引擎（随机定时）+ SQLite 存储 + 梦境数据 RPC。
+- insert:
+    - id: dsh-dreaming
+      name: dsh-dreaming
