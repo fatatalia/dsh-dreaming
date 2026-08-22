@@ -9,6 +9,7 @@
  */
 import { TypertRemoteService } from "@deepseek-ai/dsh-typert-protocol";
 import z from "@deepseek-ai/schemastery";
+import { defineTool } from "@deepseek-ai/dsh-tools";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { DreamEngine } from "./lib/dream-engine.mjs";
@@ -16,7 +17,7 @@ import { DreamStore } from "./lib/store.mjs";
 
 export const name = "dsh-dreaming";
 
-export const inject = ["typert", "settings", "llm", "agents", "agentDefaultModel", "agentPresets", "sessions", "workspaceRegistry", "connection"];
+export const inject = ["typert", "settings", "llm", "agents", "agentDefaultModel", "agentPresets", "sessions", "workspaceRegistry", "connection", "tools"];
 
 /** `dreaming` settings namespace：默认工作区 + 随机窗口。 */
 const DreamSchema = z.object({
@@ -177,6 +178,45 @@ export function apply(ctx, config) {
     windowStart: scope.get()?.windowStart,
     windowEnd: scope.get()?.windowEnd,
   });
+
+  // 注册 dream_latest 工具：查询最近梦境（供早安心跳等场景调用，替代读 OpenClaw 遗留 DREAMS.md）。
+  const dreamLatestTool = defineTool({
+    name: "dream_latest",
+    description: "查询最近几天的梦境日记（dsh-dreaming 存储，SQLite）。用于早安心跳分享梦境。返回最近 N 条梦境（日期 + 内容），新→旧。",
+    parameters: {
+      days: { type: "number", description: "返回最近 N 天的梦境（每天最多 2 条），默认 2，范围 1-7" },
+    },
+    output: {
+      schema: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          dreams: {
+            type: "array",
+            required: true,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                date: { type: "string", required: true },
+                content: { type: "string", required: true },
+              },
+            },
+          },
+        },
+      },
+      render(args, value) {
+        return [{ type: "text", text: `最近梦境 ${value.dreams?.length ?? 0} 条` }];
+      },
+    },
+    async execute(args) {
+      const days = Math.min(Math.max(Number(args?.days) || 2, 1), 7);
+      const dreams = store.listDreams(days * 2, null);
+      return { dreams: dreams.slice(0, days * 2).map((d) => ({ date: d.date, content: d.content })) };
+    },
+  });
+  ctx.tools.register(dreamLatestTool);
+  log.info("已注册 dream_latest 工具（最近梦境查询）");
   // 配置 remote（设置页读写）+ typert manifest。
   new DreamingService(ctx, scope, engine, ctx.get("llm"));
   ctx.effect(() => ctx.typert.register(MANIFEST), "dsh-dreaming: typert manifest");
