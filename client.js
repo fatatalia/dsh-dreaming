@@ -215,7 +215,7 @@ window.__ModuleLoader__.load({
       const [windowStart, setWindowStart] = React.useState("02:00");
       const [windowEnd, setWindowEnd] = React.useState("04:30");
       const [model, setModel] = React.useState("");
-      const [stepTimeoutMs, setStepTimeoutMs] = React.useState(0);
+      const [stepTimeoutSec, setStepTimeoutSec] = React.useState(0);
       const [providers, setProviders] = React.useState([]);
       const [models, setModels] = React.useState([]);
       const [saved, setSaved] = React.useState(false);
@@ -230,7 +230,7 @@ window.__ModuleLoader__.load({
           setWindowEnd(typeof cfg?.windowEnd === "string" ? cfg.windowEnd : "04:30");
           setProvider(typeof cfg?.provider === "string" ? cfg.provider : "");
           setModel(typeof cfg?.model === "string" ? cfg.model : "");
-          if (typeof cfg?.stepTimeoutMs === "number") setStepTimeoutMs(cfg.stepTimeoutMs);
+          if (typeof cfg?.stepTimeoutSec === "number") setStepTimeoutSec(cfg.stepTimeoutSec);
           setState({ status: "ready", writable: cfg?.writable !== false });
         }, () => { if (current) setState({ status: "error", writable: true }); });
         return () => { current = false; };
@@ -255,7 +255,7 @@ window.__ModuleLoader__.load({
       }, [listModels, provider, loadTick]);
 
       const save = () => {
-        Promise.resolve().then(() => setConfig({ workspace, provider, model, windowStart, windowEnd, stepTimeoutMs }))
+        Promise.resolve().then(() => setConfig({ workspace, provider, model, windowStart, windowEnd, stepTimeoutSec }))
           .then(() => { setSaved(true); setTimeout(() => setSaved(false), 1500); })
           .catch((e) => console.error("dsh-dreaming save failed", e));
       };
@@ -299,8 +299,8 @@ window.__ModuleLoader__.load({
         ] }),
         S.jsxs("div", { style: row, children: [
           S.jsx("label", { style: labelStyle, children: "单步超时" }),
-          S.jsx("input", { type: "number", min: 0, step: 1000, value: stepTimeoutMs, disabled: !writable, onChange: (e) => setStepTimeoutMs(Number(e.target.value) || 0), style: { ...inputStyle, maxWidth: 160 }, placeholder: "0 = 不限制" }),
-          S.jsx("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 }, children: "ms，单步（一次模型请求）超过该时长强制中断，0 = 不限制" }),
+          S.jsx("input", { type: "number", min: 0, step: 1, value: stepTimeoutSec, disabled: !writable, onChange: (e) => setStepTimeoutSec(Number(e.target.value) || 0), style: { ...inputStyle, maxWidth: 160 }, placeholder: "0 = 不限制" }),
+          S.jsx("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 }, children: "秒，单步（一次模型请求）超过该时长强制中断，0 = 不限制" }),
         ] }),
         S.jsxs("div", { style: { marginTop: 14, display: "flex", gap: 8 }, children: [
           S.jsx("button", { type: "button", disabled: !writable, onClick: save, style: { padding: "6px 14px", borderRadius: 8, cursor: writable ? "pointer" : "default", fontWeight: 500 }, children: saved ? "✓ 已保存" : "保存" }),

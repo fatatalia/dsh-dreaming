@@ -26,8 +26,8 @@ const DreamSchema = z.object({
   windowEnd: z.string(),
   provider: z.string(),
   model: z.string(),
-  /** turn 级单步超时（ms）：step 超过该时长被 dsh-turn-guard 强制 cancel；不配/0 = 不限制。 */
-  stepTimeoutMs: z.number(),
+  /** turn 级单步超时（秒）：step 超过该时长被 dsh-turn-guard 强制 cancel；不配/0 = 不限制。 */
+  stepTimeoutSec: z.number(),
 });
 
 // ── Typert wire schemas（宽松 parse，同 imessage 插件） ──────────────────────
@@ -123,7 +123,7 @@ class DreamingService extends TypertRemoteService {
       windowEnd: typeof snap?.windowEnd === "string" ? snap.windowEnd : "04:30",
       provider: typeof snap?.provider === "string" ? snap.provider : "",
       model: typeof snap?.model === "string" ? snap.model : "",
-      stepTimeoutMs: typeof snap?.stepTimeoutMs === "number" && snap.stepTimeoutMs > 0 ? snap.stepTimeoutMs : 0,
+      stepTimeoutSec: typeof snap?.stepTimeoutSec === "number" && snap.stepTimeoutSec > 0 ? snap.stepTimeoutSec : 0,
       writable: true,
     };
   }
@@ -135,7 +135,7 @@ class DreamingService extends TypertRemoteService {
     if (typeof payload?.windowEnd === "string") patch.windowEnd = payload.windowEnd;
     if (typeof payload?.provider === "string") patch.provider = payload.provider;
     if (typeof payload?.model === "string") patch.model = payload.model;
-    if (typeof payload?.stepTimeoutMs === "number") patch.stepTimeoutMs = payload.stepTimeoutMs > 0 ? payload.stepTimeoutMs : 0;
+    if (typeof payload?.stepTimeoutSec === "number") patch.stepTimeoutSec = payload.stepTimeoutSec > 0 ? payload.stepTimeoutSec : 0;
     if (Object.keys(patch).length === 0) return { ok: true };
     await this.scope.update(patch);
     // 热更新引擎（工作区/窗口 + 重排下一次）。
@@ -145,7 +145,7 @@ class DreamingService extends TypertRemoteService {
       model: patch.model,
       windowStart: patch.windowStart,
       windowEnd: patch.windowEnd,
-      stepTimeoutMs: patch.stepTimeoutMs,
+      stepTimeoutSec: patch.stepTimeoutSec,
     });
     return { ok: true };
   }
@@ -182,7 +182,7 @@ export function apply(ctx, config) {
     model: scope.get()?.model,
     windowStart: scope.get()?.windowStart,
     windowEnd: scope.get()?.windowEnd,
-    stepTimeoutMs: typeof scope.get()?.stepTimeoutMs === "number" && scope.get()?.stepTimeoutMs > 0 ? scope.get()?.stepTimeoutMs : 0,
+    stepTimeoutSec: typeof scope.get()?.stepTimeoutSec === "number" && scope.get()?.stepTimeoutSec > 0 ? scope.get()?.stepTimeoutSec : 0,
   });
 
   // 注册 dream_latest 工具：查询最近梦境（供早安心跳等场景调用，替代读 OpenClaw 遗留 DREAMS.md）。
