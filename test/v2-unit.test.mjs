@@ -7,6 +7,7 @@
  */
 import { DreamStore, similarity } from "../lib/store.mjs";
 import { DreamEngine } from "../lib/dream-engine.mjs";
+import { renderDreams } from "../lib/dream-render.mjs";
 import { writeFile, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -90,8 +91,8 @@ function rmSyncRec(p) { try { rm(p, { force: true }); } catch {} }
   const promotions2 = await engine.promoteBySignals([], dedupedRecs, "2026-08-18");
   ok("promoteBySignals：重复主题被跳过（promotions2 为空）", promotions2.length === 0, JSON.stringify(promotions2));
 
-  // compactMemoryForBudget：构造 >25KB 混合文件（手写段 + 多个标记段）
-  const hand = "# MEMORY.md\n\n## 稳定区\n\n用户手写的重要信息，绝对不能删。\n\n噗嗤，这段也是手写的，很重要。\n\n".repeat(200);
+  // compactMemoryForBudget：构造 > budgetBytes（默认 128KB）混合文件（手写段 + 多个标记段）
+  const hand = "# MEMORY.md\n\n## 稳定区\n\n用户手写的重要信息，绝对不能删。\n\n噗嗤，这段也是手写的，很重要。\n\n".repeat(1012);
   const autoSections = [];
   let big = hand;
   for (let i = 0; i < 30; i++) {
@@ -101,14 +102,35 @@ function rmSyncRec(p) { try { rm(p, { force: true }); } catch {} }
   }
   await writeFile(memoryPath, big, "utf8");
   const before = Buffer.byteLength(big, "utf8");
-  ok("预算：测试文件超过 25KB", before > engine.budgetBytes, `${before} bytes`);
+  ok("预算：测试文件超过 budgetBytes（128KB）", before > engine.budgetBytes, `${before} bytes`);
   await engine.compactMemoryForBudget();
   const after = await readFile(memoryPath, "utf8");
-  ok("预算：回收后 ≤ 25KB", Buffer.byteLength(after, "utf8") <= engine.budgetBytes, `${Buffer.byteLength(after, "utf8")} bytes`);
+  ok("预算：回收后 ≤ budgetBytes", Buffer.byteLength(after, "utf8") <= engine.budgetBytes, `${Buffer.byteLength(after, "utf8")} bytes`);
   ok("预算：手写段保留", after.includes("用户手写的重要信息"), "手写段被误删！");
   ok("预算：仍有晋升标记段存在", after.includes("梦境沉淀（dsh-dreaming）"), "全部晋升段被删光");
 
   store.close();
+}
+
+// 5. dream_latest render 完整性（2026-08-25 事故回归测试）：
+//    渲染文本必须包含每条梦境的日期与全文，不能只输出条数（"最近梦境 N 条"）。
+{
+  const dreams = [
+    { date: "2026-08-25", content: "七月五日十二点三十六分三十三秒，机器醒来，开始数数。" },
+    { date: "2026-08-24", content: "翻开上两页，植物账本还绿着。" },
+  ];
+  const text = renderDreams(dreams);
+  ok("render：输出包含条数", text.includes("最近梦境 2 条"), text);
+  ok("render：包含第一条日期", text.includes("【2026-08-25】"), text);
+  ok("render：包含第一条内容", text.includes("机器醒来，开始数数"), text);
+  ok("render：包含第二条日期", text.includes("【2026-08-24】"), text);
+  ok("render：包含第二条内容", text.includes("植物账本还绿着"), text);
+  ok("render：不以纯条数结束（有实际内容）", text.length > "最近梦境 2 条".length, `length=${text.length}`);
+
+  const empty = renderDreams([]);
+  ok("render：空列表返回明确文案", empty.includes("没有梦境记录"), empty);
+  const nil = renderDreams(undefined);
+  ok("render：undefined 不抛错且返回空文案", nil.includes("没有梦境记录"), String(nil));
 }
 
 await rmSyncRec(dir);

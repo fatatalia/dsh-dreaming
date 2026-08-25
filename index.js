@@ -14,6 +14,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { DreamEngine } from "./lib/dream-engine.mjs";
 import { DreamStore } from "./lib/store.mjs";
+import { renderDreams } from "./lib/dream-render.mjs";
 
 export const name = "dsh-dreaming";
 
@@ -212,12 +213,7 @@ export function apply(ctx, config) {
         },
       },
       render(args, value) {
-        const dreams = value?.dreams ?? [];
-        if (dreams.length === 0) {
-          return [{ type: "text", text: "最近没有梦境记录" }];
-        }
-        const lines = dreams.map((d) => `【${d.date}】\n${d.content}`);
-        return [{ type: "text", text: `最近梦境 ${dreams.length} 条\n\n${lines.join("\n\n")}` }];
+        return [{ type: "text", text: renderDreams(value?.dreams) }];
       },
     },
     async execute(args) {
