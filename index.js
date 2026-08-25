@@ -212,7 +212,12 @@ export function apply(ctx, config) {
         },
       },
       render(args, value) {
-        return [{ type: "text", text: `最近梦境 ${value.dreams?.length ?? 0} 条` }];
+        const dreams = value?.dreams ?? [];
+        if (dreams.length === 0) {
+          return [{ type: "text", text: "最近没有梦境记录" }];
+        }
+        const lines = dreams.map((d) => `【${d.date}】\n${d.content}`);
+        return [{ type: "text", text: `最近梦境 ${dreams.length} 条\n\n${lines.join("\n\n")}` }];
       },
     },
     async execute(args) {
