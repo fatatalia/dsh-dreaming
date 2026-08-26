@@ -6,7 +6,7 @@
  *  4. compactMemoryForBudget：只删标记段、保留手写段
  */
 import { DreamStore, similarity } from "../lib/store.mjs";
-import { DreamEngine } from "../lib/dream-engine.mjs";
+import { DreamEngine, stripMeta } from "../lib/dream-engine.mjs";
 import { renderDreams } from "../lib/dream-render.mjs";
 import { writeFile, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -41,6 +41,28 @@ mkdirSync(dir, { recursive: true });
   store.close();
 }
 rmSyncRec(dbPath);
+
+// 1.5 stripMeta：剥离 Hindsight 元数据字段（| When: | Involving: |）
+{
+  const cases = [
+    ["代码东家里有五只猫 | When: 无 | Involving: 代码东 | 无", "代码东家里有五只猫"],
+    ["紫紫是纯橘猫，2018年8月出生 | When: 2018年8月 | Involving: 紫紫（代码东家的猫） | 无", "紫紫是纯橘猫，2018年8月出生"],
+    ["法塔的管家名叫代码东 | When: 无 | Involving: 法塔 (主人), 代码东 (管家) | 无", "法塔的管家名叫代码东"],
+    ["用户决定跳过 heartbeat- 前缀会话的记忆加载 | When: 2026-08-20 | Involving: 用户", "用户决定跳过 heartbeat- 前缀会话的记忆加载"],
+    ["多查询 recall 应取当日和近两天结果 | When: 2026-08-18", "多查询 recall 应取当日和近两天结果"],
+    ["只有 Involving 字段 | Involving: 代码东", "只有 Involving 字段"],
+  ];
+  for (const [input, expect] of cases) {
+    const got = stripMeta(input);
+    ok(`stripMeta：${input.slice(0, 24)}… → ${expect.slice(0, 20)}`, got === expect, `got=${got}`);
+  }
+  // 正文里的 | 分隔（非元数据）必须保留
+  const keep = stripMeta("dsh-llm-retry 只做同 provider 重试，不切换模型 | 排查 dsh 的模型 fallback 能力");
+  ok("stripMeta：正文 | 分隔保留", keep.includes("| 排查 dsh 的模型 fallback 能力"), keep);
+  // 无元数据的文本原样返回
+  const plain = stripMeta("今天小飞机预产期重新估算为8月18到20日");
+  ok("stripMeta：无元数据文本不变", plain === "今天小飞机预产期重新估算为8月18到20日", plain);
+}
 
 function rmSyncRec(p) { try { rm(p, { force: true }); } catch {} }
 
