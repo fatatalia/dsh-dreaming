@@ -84,4 +84,5 @@ node test/v2-unit.test.mjs   # 14 项：store 迁移 / 碎片累计 / 信号晋�
 
 - 新插件项目必须建依赖软链（`node_modules/@deepseek-ai` → dsh 全局依赖树），否则 import 报 ERR_MODULE_NOT_FOUND
 - `connection.rpc.handle` 必须传第三个参数 `{ authority }`（register 读 options.authority，缺省会崩）
+- **inject 必须声明 `webServer`**（dsh 0.1.5 起严格检查）：index.js 的 `export const inject` 需含 `"webServer"`，漏了报 `cannot get property "webServer" without inject`，插件加载失败（2026-09-10 踩过）
 - 改代码后重启 web 生效（HMR 已禁用）：`launchctl kickstart -k system/com.dsh.web`

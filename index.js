@@ -18,7 +18,7 @@ import { renderDreams } from "./lib/dream-render.mjs";
 
 export const name = "dsh-dreaming";
 
-export const inject = ["typert", "settings", "llm", "agents", "agentDefaultModel", "agentPresets", "sessions", "workspaceRegistry", "connection", "tools"];
+export const inject = ["typert", "settings", "llm", "agents", "agentDefaultModel", "agentPresets", "sessions", "workspaceRegistry", "connection", "tools", "webServer"];
 
 /** `dreaming` settings namespace：默认工作区 + 随机窗口。 */
 const DreamSchema = z.object({
