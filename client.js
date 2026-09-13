@@ -215,6 +215,7 @@ window.__ModuleLoader__.load({
       const [windowStart, setWindowStart] = React.useState("02:00");
       const [windowEnd, setWindowEnd] = React.useState("04:30");
       const [model, setModel] = React.useState("");
+      const [reasoningEffort, setReasoningEffort] = React.useState("high");
       const [stepTimeoutSec, setStepTimeoutSec] = React.useState(0);
       const [providers, setProviders] = React.useState([]);
       const [models, setModels] = React.useState([]);
@@ -230,6 +231,7 @@ window.__ModuleLoader__.load({
           setWindowEnd(typeof cfg?.windowEnd === "string" ? cfg.windowEnd : "04:30");
           setProvider(typeof cfg?.provider === "string" ? cfg.provider : "");
           setModel(typeof cfg?.model === "string" ? cfg.model : "");
+          setReasoningEffort(typeof cfg?.reasoningEffort === "string" ? cfg.reasoningEffort : "high");
           if (typeof cfg?.stepTimeoutSec === "number") setStepTimeoutSec(cfg.stepTimeoutSec);
           setState({ status: "ready", writable: cfg?.writable !== false });
         }, () => { if (current) setState({ status: "error", writable: true }); });
@@ -254,8 +256,15 @@ window.__ModuleLoader__.load({
         return () => { current = false; };
       }, [listModels, provider, loadTick]);
 
+      // 思考等级下拉：优先用所选模型自报的支持档位（listModels 附带的 efforts），
+      // 模型未选/能力未知时回落标准五档。
+      const selectedModel = (models || []).find((m) => m.id === model);
+      const effortOptions = Array.isArray(selectedModel?.efforts) && selectedModel.efforts.length > 0
+        ? selectedModel.efforts
+        : ["off", "low", "medium", "high", "max"];
+
       const save = () => {
-        Promise.resolve().then(() => setConfig({ workspace, provider, model, windowStart, windowEnd, stepTimeoutSec }))
+        Promise.resolve().then(() => setConfig({ workspace, provider, model, reasoningEffort, windowStart, windowEnd, stepTimeoutSec }))
           .then(() => { setSaved(true); setTimeout(() => setSaved(false), 1500); })
           .catch((e) => console.error("dsh-dreaming save failed", e));
       };
@@ -296,6 +305,14 @@ window.__ModuleLoader__.load({
             S.jsx("option", { value: "", children: "（全局默认）" }),
             ...(models || []).map((m) => S.jsx("option", { key: m.id, value: m.id, children: m.name })),
           ] }),
+        ] }),
+        S.jsxs("div", { style: row, children: [
+          S.jsx("label", { style: labelStyle, children: "思考等级" }),
+          S.jsx("select", { value: reasoningEffort, disabled: !writable, onChange: (e) => setReasoningEffort(e.target.value), style: inputStyle, children: [
+            S.jsx("option", { value: "", children: "（provider 默认）" }),
+            ...effortOptions.map((lvl) => S.jsx("option", { key: lvl, value: lvl, children: lvl })),
+          ] }),
+          S.jsx("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 }, children: selectedModel?.defaultEffort ? `模型默认：${selectedModel.defaultEffort}` : "默认 high；仅影响梦境会话" }),
         ] }),
         S.jsxs("div", { style: row, children: [
           S.jsx("label", { style: labelStyle, children: "单步超时" }),

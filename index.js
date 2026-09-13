@@ -27,6 +27,12 @@ const DreamSchema = z.object({
   windowEnd: z.string(),
   provider: z.string(),
   model: z.string(),
+  /**
+   * 思考等级：off/low/medium/high/max，空串 = 跟随 provider 默认。
+   * 2026-09-11 加：此前梦境的 reasoningEffort 由 provider 层 `reasoning: high` 隐式兜底，
+   * 设置页无从调整；现在显式配置、默认 high、保存即热生效。
+   */
+  reasoningEffort: z.string(),
   /** turn 级单步超时（秒）：step 超过该时长被 dsh-turn-guard 强制 cancel；不配/0 = 不限制。 */
   stepTimeoutSec: z.number(),
 });
@@ -108,12 +114,32 @@ class DreamingService extends TypertRemoteService {
     return list.map((p) => ({ id: p.provider ?? p.id, name: p.name ?? p.provider ?? p.id }));
   }
 
-  /** 指定 provider 的模型列表。 */
+  /**
+   * 指定 provider 的模型列表。附带给每个模型带上它支持的思考等级（设置页下拉用）。
+   * llm.listModels 只回 id/name，能力元数据要走 resolveModelInfo；逐个查询是本地目录
+   * 查询（无网络），失败则该项不带 efforts（客户端回落标准五档）。
+   */
   async listModels(payload) {
     const provider = typeof payload?.provider === "string" ? payload.provider : "";
     if (!provider) throw new Error("provider 必填");
     const list = await this.llm?.listModels?.(provider) ?? [];
-    return list.map((m) => ({ id: m.id, name: m.name ?? m.id }));
+    const resolve = this.llm?.resolveModelInfo;
+    const out = [];
+    for (const m of list) {
+      const item = { id: m.id, name: m.name ?? m.id };
+      if (typeof resolve === "function") {
+        try {
+          const info = await resolve.call(this.llm, provider, m.id);
+          const reasoning = info?.reasoning;
+          if (reasoning !== void 0) {
+            item.efforts = reasoning.efforts.map((e) => e.id);
+            if (reasoning.defaultEffort !== void 0) item.defaultEffort = reasoning.defaultEffort;
+          }
+        } catch { /* 能力未知：留空，客户端用标准档位兜底 */ }
+      }
+      out.push(item);
+    }
+    return out;
   }
 
   getConfig() {
@@ -124,6 +150,7 @@ class DreamingService extends TypertRemoteService {
       windowEnd: typeof snap?.windowEnd === "string" ? snap.windowEnd : "04:30",
       provider: typeof snap?.provider === "string" ? snap.provider : "",
       model: typeof snap?.model === "string" ? snap.model : "",
+      reasoningEffort: typeof snap?.reasoningEffort === "string" ? snap.reasoningEffort : "high",
       stepTimeoutSec: typeof snap?.stepTimeoutSec === "number" && snap.stepTimeoutSec > 0 ? snap.stepTimeoutSec : 0,
       writable: true,
     };
@@ -136,14 +163,16 @@ class DreamingService extends TypertRemoteService {
     if (typeof payload?.windowEnd === "string") patch.windowEnd = payload.windowEnd;
     if (typeof payload?.provider === "string") patch.provider = payload.provider;
     if (typeof payload?.model === "string") patch.model = payload.model;
+    if (typeof payload?.reasoningEffort === "string") patch.reasoningEffort = payload.reasoningEffort;
     if (typeof payload?.stepTimeoutSec === "number") patch.stepTimeoutSec = payload.stepTimeoutSec > 0 ? payload.stepTimeoutSec : 0;
     if (Object.keys(patch).length === 0) return { ok: true };
     await this.scope.update(patch);
-    // 热更新引擎（工作区/窗口 + 重排下一次）。
+    // 热更新引擎（工作区/窗口/思考等级 + 重排下一次）。
     this.engine.setConfig({
       workspace: patch.workspace,
       provider: patch.provider,
       model: patch.model,
+      reasoningEffort: patch.reasoningEffort,
       windowStart: patch.windowStart,
       windowEnd: patch.windowEnd,
       stepTimeoutSec: patch.stepTimeoutSec,
@@ -166,6 +195,7 @@ export function apply(ctx, config) {
       workspace: join(homedir(), "dsh", "mayacode"),
       windowStart: "02:00",
       windowEnd: "04:30",
+      reasoningEffort: "high",
     },
   });
 
@@ -183,7 +213,9 @@ export function apply(ctx, config) {
     model: scope.get()?.model,
     windowStart: scope.get()?.windowStart,
     windowEnd: scope.get()?.windowEnd,
+    reasoningEffort: typeof scope.get()?.reasoningEffort === "string" ? scope.get()?.reasoningEffort : "high",
     stepTimeoutSec: typeof scope.get()?.stepTimeoutSec === "number" && scope.get()?.stepTimeoutSec > 0 ? scope.get()?.stepTimeoutSec : 0,
+    llm: ctx.get("llm"),
   });
 
   // 注册 dream_latest 工具：查询最近梦境（供早安心跳等场景调用，替代读 OpenClaw 遗留 DREAMS.md）。
