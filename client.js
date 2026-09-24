@@ -159,7 +159,7 @@ window.__ModuleLoader__.load({
 
     // ── remote 贡献：声明 host remote service（梦境设置读写） ────────────────
     const identity = (value) => value;
-    const codec = (symbol) => ({ mode: "strict", typeSymbol: symbol, schema: { parse: identity } });
+    const codec = (symbol) => ({ mode: "strict", typeSymbol: symbol, schema: { parse: identity }, create: () => ({ parse: identity }) });
     const CONTRIBUTION = {
       package: "dsh-dreaming",
       descriptors: [

@@ -18,33 +18,36 @@ import { renderDreams } from "./lib/dream-render.mjs";
 
 export const name = "dsh-dreaming";
 
-export const inject = ["typert", "settings", "llm", "agents", "agentDefaultModel", "agentPresets", "sessions", "workspaceRegistry", "connection", "tools", "webServer"];
+export const inject = ["typert", "llm", "agents", "agentDefaultModel", "agentPresets", "sessions", "workspaceRegistry", "connection", "tools", "webServer"];
 
-/** `dreaming` settings namespace：默认工作区 + 随机窗口。 */
-const DreamSchema = z.object({
-  workspace: z.string(),
-  windowStart: z.string(),
-  windowEnd: z.string(),
-  provider: z.string(),
-  model: z.string(),
+// 2026-09-24 适配 dsh 0.1.7：ctx.settings.register() 已移除，原 `dreaming`
+// settings namespace 并入插件 Config；.volatile() 字段可在设置页热改。
+/** `dreaming` 配置：默认工作区 + 随机窗口。 */
+export const Config = z.object({
+  /** 默认工作区（梦境产物落盘位置）。 */
+  workspace: z.string().default(join(homedir(), "dsh", "mayacode")).volatile(),
+  windowStart: z.string().default("02:00").volatile(),
+  windowEnd: z.string().default("04:30").volatile(),
+  provider: z.string().volatile(),
+  model: z.string().volatile(),
   /**
    * 思考等级：off/low/medium/high/max，空串 = 跟随 provider 默认。
    * 2026-09-11 加：此前梦境的 reasoningEffort 由 provider 层 `reasoning: high` 隐式兜底，
    * 设置页无从调整；现在显式配置、默认 high、保存即热生效。
    */
-  reasoningEffort: z.string(),
+  reasoningEffort: z.string().default("high").volatile(),
   /** turn 级单步超时（秒）：step 超过该时长被 dsh-turn-guard 强制 cancel；不配/0 = 不限制。 */
-  stepTimeoutSec: z.number(),
+  stepTimeoutSec: z.number().volatile(),
 });
 
 // ── Typert wire schemas（宽松 parse，同 imessage 插件） ──────────────────────
 function parseObj() {
-  return {
-    parse(value) {
-      if (typeof value !== "object" || value === null) throw new Error("expected object");
-      return value;
-    },
+  // 0.1.7：typert strict codec 必须有 create() 工厂（gateway 走 codec.create().parse(v)）。
+  const parse = (value) => {
+    if (typeof value !== "object" || value === null) throw new Error("expected object");
+    return value;
   };
+  return { parse, create: () => ({ parse }) };
 }
 const getResultSchema = parseObj();
 const setPayloadSchema = parseObj();
@@ -62,7 +65,7 @@ const MANIFEST = {
       method: "getConfig",
       invocation: { kind: "direct" },
       parameters: [],
-      result: { mode: "strict", typeSymbol: "dsh-dreaming#DreamingConfig", schema: getResultSchema },
+      result: { mode: "strict", typeSymbol: "dsh-dreaming#DreamingConfig", schema: getResultSchema, create: () => getResultSchema },
     },
     {
       id: "dsh-dreaming#dreaming/listProviders",
@@ -71,7 +74,7 @@ const MANIFEST = {
       method: "listProviders",
       invocation: { kind: "direct" },
       parameters: [],
-      result: { mode: "strict", typeSymbol: "dsh-dreaming#ProviderList", schema: getResultSchema },
+      result: { mode: "strict", typeSymbol: "dsh-dreaming#ProviderList", schema: getResultSchema, create: () => getResultSchema },
     },
     {
       id: "dsh-dreaming#dreaming/listModels",
@@ -80,9 +83,9 @@ const MANIFEST = {
       method: "listModels",
       invocation: { kind: "direct" },
       parameters: [
-        { name: "payload", wire: "payload", source: "json", codec: { mode: "strict", typeSymbol: "dsh-dreaming#ProviderParam", schema: getResultSchema } },
+        { name: "payload", wire: "payload", source: "json", codec: { mode: "strict", typeSymbol: "dsh-dreaming#ProviderParam", schema: getResultSchema, create: () => getResultSchema } },
       ],
-      result: { mode: "strict", typeSymbol: "dsh-dreaming#ModelList", schema: getResultSchema },
+      result: { mode: "strict", typeSymbol: "dsh-dreaming#ModelList", schema: getResultSchema, create: () => getResultSchema },
     },
     {
       id: "dsh-dreaming#dreaming/setConfig",
@@ -91,9 +94,9 @@ const MANIFEST = {
       method: "setConfig",
       invocation: { kind: "direct" },
       parameters: [
-        { name: "payload", wire: "payload", source: "json", codec: { mode: "strict", typeSymbol: "dsh-dreaming#SetPayload", schema: setPayloadSchema } },
+        { name: "payload", wire: "payload", source: "json", codec: { mode: "strict", typeSymbol: "dsh-dreaming#SetPayload", schema: setPayloadSchema, create: () => setPayloadSchema } },
       ],
-      result: { mode: "strict", typeSymbol: "dsh-dreaming#SetResult", schema: setResultSchema },
+      result: { mode: "strict", typeSymbol: "dsh-dreaming#SetResult", schema: setResultSchema, create: () => setResultSchema },
     },
   ],
   model: { services: [], events: [], objects: [] },
@@ -189,15 +192,28 @@ export function apply(ctx, config) {
     error: (m) => { console.error(`[dr:err] ${m}`); try { Logger?.error?.(m); } catch {} },
   };
 
-  // settings namespace：默认工作区 = 当前用户 dsh/mayacode，窗口 02:00-04:30。
-  const scope = ctx.settings.register("dreaming", DreamSchema, {
-    base: {
-      workspace: join(homedir(), "dsh", "mayacode"),
-      windowStart: "02:00",
-      windowEnd: "04:30",
-      reasoningEffort: "high",
+  // 0.1.7：配置即插件 Config 的 volatile 字段，这里适配出等价的 scope 外壳。
+  // （默认工作区 = 当前用户 dsh/mayacode，窗口 02:00-04:30。）
+  const scope = {
+    get: () => ({
+      workspace: config.workspace.get(),
+      windowStart: config.windowStart.get(),
+      windowEnd: config.windowEnd.get(),
+      provider: config.provider.get(),
+      model: config.model.get(),
+      reasoningEffort: config.reasoningEffort.get(),
+      stepTimeoutSec: config.stepTimeoutSec.get(),
+    }),
+    async update(patch) {
+      const editor = ctx.get("configEditor");
+      const entry = ctx.fiber?.entry;
+      if (!editor || entry === undefined) return;
+      await editor.edit(entry, (current) => ({ ...current, ...patch }));
     },
-  });
+    watch(cb) {
+      ctx.on("loader/volatile-update", () => { cb(scope.get()); });
+    },
+  };
 
   const store = new DreamStore();
   const engine = new DreamEngine({

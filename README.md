@@ -4,6 +4,16 @@
 
 **v2 核心哲学：LLM 只写梦，判定交给行为学信号。**（对齐 OpenClaw Dreaming）
 
+## dsh 版本兼容性
+
+**要求 dsh ≥ 0.1.7-rc.1**（已在 0.1.7-rc.1 实测通过）。
+
+三项 0.1.7 适配（2026-09-24）：
+
+- **`ctx.settings.register()` 已移除**：原 `dreaming` settings namespace 并入插件 `Config`，可热改字段标 `.volatile()`，改动由 loader 提交进运行中的引用并广播 `loader/volatile-update`；`inject` 去掉 `settings`。
+- **Typert strict codec 必须带 `create()` 工厂**（客户端与服务端两处）。
+- **`dream-narrative` preset 改为声明式**：0.1.7 起 `~/.dsh/.agent-presets/` 文件系统方式废弃，preset 作为普通插件行并入本插件 `cordis.patch.yml`（`@deepseek-ai/dsh-agent-preset`，`order: 10` 与主 preset 拉开距离，`persona.complete: true` + 不注入运行时上下文）。
+
 ## 工作原理（v2 闭环）
 
 ```
