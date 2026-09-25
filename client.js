@@ -1,9 +1,15 @@
 /**
  * dsh-dreaming — client 半部分（浏览器 bundle）
  *
- * 在会话页面注册 "梦境" Tab（conversation.view 槽位，同 dsh-automation 模式）：
- * 内部再分"梦境日记 / 晋升沉淀"两个子 Tab；梦境日记支持按日期查询，
+ * 2026-09-25 改版：从会话页 Tab（conversation.view）升级为**左侧菜单独立页面**，
+ * 对齐官方 @deepseek-ai/dsh-client-ui-schedule 的做法：
+ *   ① main 槽位          —— 页面本体（用 key 关联）
+ *   ② sidebar.panellist  —— 左侧菜单项（用 id 关联；与 ① 同一个 id "dreaming"）
+ * 点击左侧「梦境」→ main 区域切换到本页面，不再是会话内的一个 Tab。
+ *
+ * 页面内部再分"梦境日记 / 晋升沉淀"两个子 Tab；梦境日记支持按日期查询，
  * 默认展示今天（凌晨）的梦境，可手工选择日期查看历史。
+ * 配置项（provider/model/窗口时间）仍留在 Settings → 梦境，**不搬进页面**。
  * 数据经 connection.rpc 走 "/dsh-dreaming" 通道。
  */
 window.__ModuleLoader__.load({
@@ -48,6 +54,33 @@ window.__ModuleLoader__.load({
     const meta = { color: "var(--dsw-alias-label-tertiary)", fontSize: 12, marginBottom: 8 };
     const body = { fontSize: 14, lineHeight: 1.7, whiteSpace: "pre-wrap", color: "var(--dsw-alias-label-primary)" };
     const empty = { color: "var(--dsw-alias-label-tertiary)", padding: "24px 0", textAlign: "center" };
+
+    // ── 页面级布局（对齐官方 TaskManagerPage：整页容器 + 内部滚动 + 内容居中）──
+    const page = {
+      width: "100%",
+      minWidth: 0,
+      height: "100%",
+      minHeight: 0,
+      color: "var(--dsw-alias-label-primary)",
+      background: "var(--dsw-alias-bg-base)",
+      fontSize: 14,
+      lineHeight: 1.6,
+      display: "flex",
+      flexDirection: "column",
+      overflow: "hidden",
+    };
+    const pageScroll = { flex: 1, minHeight: 0, overflow: "auto", scrollbarGutter: "stable" };
+    const pageContent = { maxWidth: 960, margin: "0 auto", padding: "0 clamp(24px, 4vw, 48px) 48px" };
+    const pageHeading = {
+      display: "flex",
+      justifyContent: "space-between",
+      alignItems: "center",
+      gap: 16,
+      marginBottom: 20,
+      paddingTop: 28,
+      flexWrap: "wrap",
+    };
+    const h1 = { flex: 1, minWidth: 0, margin: 0, fontSize: 20, fontWeight: 500, lineHeight: "28px" };
 
     const tabBtn = (active) => ({
       padding: "6px 16px",
@@ -96,25 +129,33 @@ window.__ModuleLoader__.load({
           .finally(() => setBusy(false));
       };
 
-      return S.jsxs("div", {
-        style: { maxWidth: 760, padding: "24px 20px", fontFamily: "var(--dsw-font-family,system-ui)", color: "var(--dsw-alias-label-primary)" },
-        children: [
-          S.jsxs("div", { style: { display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }, children: [
-            S.jsx("span", { style: { fontSize: 17, fontWeight: 700 }, children: "🌙 梦境" }),
-            S.jsx("button", {
-              type: "button",
-              disabled: busy,
-              onClick: triggerDream,
-              style: { marginLeft: "auto", padding: "6px 14px", borderRadius: 8, border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-base)", cursor: busy ? "default" : "pointer", fontWeight: 500 },
-              children: busy ? "做梦进行中…" : "立即做梦",
-            }),
-            S.jsx("button", {
-              type: "button",
-              onClick: () => setTick((t) => t + 1),
-              style: { padding: "6px 12px", borderRadius: 8, border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-base)", cursor: "pointer" },
-              children: "刷新",
-            }),
-          ]}),
+      return S.jsx("div", {
+        style: page,
+        children: S.jsx("div", {
+          style: pageScroll,
+          children: S.jsx("div", {
+            style: pageContent,
+            children: S.jsxs("div", {
+              children: [
+                // 页面标题栏（独立页面的页头；左侧菜单点进来就是这个页面）
+                S.jsxs("div", { style: pageHeading, children: [
+                  S.jsx("h1", { style: h1, children: "🌙 梦境" }),
+                  S.jsxs("div", { style: { display: "flex", gap: 8, alignItems: "center", flex: "none" }, children: [
+                    S.jsx("button", {
+                      type: "button",
+                      disabled: busy,
+                      onClick: triggerDream,
+                      style: { padding: "6px 14px", borderRadius: 8, border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-base)", cursor: busy ? "default" : "pointer", fontWeight: 500 },
+                      children: busy ? "做梦进行中…" : "立即做梦",
+                    }),
+                    S.jsx("button", {
+                      type: "button",
+                      onClick: () => setTick((t) => t + 1),
+                      style: { padding: "6px 12px", borderRadius: 8, border: "1px solid var(--dsw-alias-border-l2)", background: "var(--dsw-alias-bg-base)", cursor: "pointer" },
+                      children: "刷新",
+                    }),
+                  ]}),
+                ]}),
           error ? S.jsx("p", { style: { color: "var(--dsw-alias-state-error-primary)", marginBottom: 12 }, children: `加载失败：${error}` }) : null,
 
           // 子 Tab
@@ -150,8 +191,11 @@ window.__ModuleLoader__.load({
                   S.jsx("div", { style: meta, children: `${p.dream_date || "—"} · ${p.target}` }),
                   S.jsx("div", { style: body, children: p.content }),
                 ] })),
-          ]}),
-        ],
+              ]}),
+              ],
+            }),
+          }),
+        }),
       });
     }
 
@@ -326,8 +370,39 @@ window.__ModuleLoader__.load({
       ] });
     }
 
+    /**
+     * 左侧菜单项图标：月牙。
+     *
+     * ⚠️ 对齐官方 TaskManagerIcon 的约束：返回的 <svg> 必须是侧边栏行的
+     * **直接图形子元素**，不要再套一层 inline wrapper —— 官方注释说明，套 wrapper
+     * 会让它成为行内盒的基线、把图标顶到标签上方（"an inline wrapper makes it the
+     * baseline of a line box inside the row's glyph slot, which lifts it above the
+     * label"）。侧边栏自己负责无障碍导航标签，这里只负责画图形。
+     */
+    function DreamIcon(props) {
+      const size = (props && props.size) || 16;
+      return S.jsx("svg", {
+        width: size,
+        height: size,
+        viewBox: "0 0 16 16",
+        fill: "none",
+        xmlns: "http://www.w3.org/2000/svg",
+        "aria-hidden": "true",
+        focusable: "false",
+        children: S.jsx("path", {
+          // 空心月牙（描边轮廓），与 ledger 的账本图标统一风格。
+          // 内外弧半径差留足（6.8 / 4.4）：差值太小的话，16px 下 stroke 会把月牙糊实。
+          d: "M8 1.4a6.8 6.8 0 1 0 6.8 6.8A4.4 4.4 0 0 1 8 1.4Z",
+          fill: "none",
+          stroke: "currentColor",
+          strokeWidth: 1.4,
+          strokeLinejoin: "round",
+        }),
+      });
+    }
+
     function apply(ctx) {
-      // 设置页卡片（Settings → 梦境）。
+      // 设置页卡片（Settings → 梦境）—— 配置项留在这里，不搬进独立页面。
       const mount = ctx.remote.$mount(CONTRIBUTION);
       const callRemote = async (method, ...args) => {
         await mount;
@@ -354,26 +429,37 @@ window.__ModuleLoader__.load({
         ),
       );
 
-      // 梦境 Tab（conversation.view）。
-      const runtimes = new Map();
-      ctx.effect(() => () => { runtimes.clear(); }, "dsh-dreaming: runtimes");
-      ctx.slots.inject("conversation.view", () =>
+      // ── 左侧菜单独立页面（2026-09-25 改版）───────────────────────────────
+      // 对齐官方 @deepseek-ai/dsh-client-ui-schedule 的双注册做法：
+      //   ① main 槽位         —— 页面本体，用 key 关联；
+      //   ② sidebar.panellist —— 左侧菜单项，用 id 关联。
+      // 两处共用同一个 id "dreaming"（页面写 key、菜单写 id），点菜单即切到该页面。
+      // 注：原 conversation.view Tab 已移除 —— 同一功能不再重复占用会话页。
+      // runtime 不再按 sessionId 缓存：createDreamingRuntime 本就不使用 sessionId
+      // （RPC 通道 "/dsh-dreaming" 与会话无关），独立页面也没有会话上下文。
+      const runtime = createDreamingRuntime(ctx.connection.rpc);
+      const PAGE_ID = "dreaming";
+
+      ctx.slots.inject("main", () =>
         ctx.slots.register(
           {
-            name: "conversation.view",
-            id: "dreaming",
-            order: 50,
-            label: () => "梦境",
-            inject: (sessionId) => {
-              let runtime = runtimes.get(sessionId);
-              if (runtime === void 0) {
-                runtime = createDreamingRuntime(ctx.connection.rpc, sessionId);
-                runtimes.set(sessionId, runtime);
-              }
-              return { runtime };
-            },
+            name: "main",
+            key: PAGE_ID,
+            inject: () => ({ runtime }),
           },
           DreamView,
+        ),
+      );
+
+      ctx.slots.inject("sidebar.panellist", () =>
+        ctx.slots.register(
+          {
+            name: "sidebar.panellist",
+            id: PAGE_ID,
+            order: 30,
+            label: () => "梦境",
+          },
+          DreamIcon,
         ),
       );
     }
