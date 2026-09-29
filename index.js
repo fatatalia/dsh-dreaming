@@ -1,7 +1,8 @@
 /**
  * dsh-dreaming — host 半部分
  *
- * 梦境记忆整合：每天凌晨随机窗口触发 Deep 闭环 —— agent 从 Hindsight 只读取材、
+ * 梦境记忆整合：每天凌晨随机窗口触发 Deep 闭环 —— 引擎从**本地取材**
+ * （每日记忆 memory/daily/*.md + 记忆库 ~/.dsh/fatatalia-memory.db 的近期对话）、
  * 生成叙事化梦境日记（法塔人格）、自主判定高价值洞察；梦境存 SQLite、晋升写回
  * MEMORY.md。web 端经 connection.rpc 读取梦境数据（"/dsh-dreaming" 通道）在
  * "梦境" Tab 展示；设置页（Settings → 梦境）经 Typert remote 配置默认工作区与

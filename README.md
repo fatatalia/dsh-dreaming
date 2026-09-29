@@ -1,6 +1,6 @@
 # dsh-dreaming — 梦境记忆整合插件（v2）
 
-每天凌晨**随机时间**（默认 02:00-04:30 窗口）把当天的记忆"梦境化"：引擎预取 Hindsight 记忆碎片，交给**裸上下文 narrative 会话**写纯梦日记；高价值洞察由**信号驱动规则**判定（无 LLM、无关键词白名单）并晋升回 MEMORY.md；梦境与晋升记录存 SQLite，web 端"梦境" Tab 展示。随 dsh web 启停。
+每天凌晨**随机时间**（默认 02:00-04:30 窗口）把当天的记忆"梦境化"：引擎从**本地取材**（每日记忆 + 记忆库近期对话，四通道），交给**裸上下文 narrative 会话**写纯梦日记；高价值洞察由**信号驱动规则**判定（无 LLM、无关键词白名单）并晋升回 MEMORY.md；梦境与晋升记录存 SQLite，web 端"梦境" Tab 展示。随 dsh web 启停。
 
 **v2 核心哲学：LLM 只写梦，判定交给行为学信号。**（对齐 OpenClaw Dreaming）
 
@@ -18,7 +18,9 @@
 
 ```
 凌晨随机时刻触发（可手动"立即做梦"）
-  → 引擎多查询 recall（Hindsight HTTP 127.0.0.1:8888，4 个不同角度查询）
+  → 引擎四通道取材（全部本地，零 HTTP）：
+       · 今日记忆 / 昨日记忆 —— memory/daily/*.md
+       · 近期对话（24h）/ 关键线索（72h，关键词过滤）—— ~/.dsh/fatatalia-memory.db
   → 去重 + 碎片化（每条 ≤280 字符，编号+来源）→ 注入 narrative 会话
   → 创建 dream-narrative 专属 preset 会话（裸上下文：不注入 AGENTS.md、无工具）
        persona = 梦境 prompt（complete:true），user message 只含碎片
@@ -40,9 +42,9 @@ dsh-dreaming/
 ├── index.js              # host 插件：connection.rpc 数据通道 + 引擎装配
 ├── client.js             # 浏览器 bundle：conversation.view "梦境" Tab
 ├── lib/
-│   ├── dream-engine.mjs  # v2：多查询 recall + narrative 会话 + 信号晋升 + 预算
+│   ├── dream-engine.mjs  # v2：四通道取材 + narrative 会话 + 信号晋升 + 预算
 │   └── store.mjs         # SQLite：dreams + promotions + recall_stats 表
-├── test/v2-unit.test.mjs # 单元测试（node test/v2-unit.test.mjs，14 项）
+├── test/v2-unit.test.mjs # 单元测试（node test/v2-unit.test.mjs，30 项）
 ├── docs/
 │   ├── v2-plan.md        # v2 完整方案（设计依据）
 │   └── prompt-v2-draft.md
@@ -55,12 +57,12 @@ dsh-dreaming/
 - **SQLite**：`~/.dsh/dreaming.db`
   - `dreams`（梦境日记正文）
   - `promotions`（晋升洞察 + `evidence` 来源/命中数/实体 + `rule` 触发信号名）
-  - `recall_stats`（跨天"被想起"信号：命中次数 / 不同查询数 / 首见·最近命中日期 / 是否已晋升）
+  - `recall_stats`（跨天"被想起"信号：命中次数 / 不同通道数 / 首见·最近命中日期 / 是否已晋升）
 - **MEMORY.md**：只追加「## YYYY-MM-DD — 梦境沉淀（dsh-dreaming）」段；预算超限自动回收最老标记段
 
 ## 专属 agent preset
 
-`~/.dsh/.agent-presets/dream-narrative/`（dsh agent-presets 用户根目录）：
+**声明式 preset 行**（见上方"dsh 版本兼容性"第 3 条 —— 0.1.7 起 `~/.dsh/.agent-presets/` 文件系统方式已废弃）：
 
 - persona = 梦境 prompt（`complete: true` + `includeRuntimeContext: false`）
 - **不挂** `agent-instructions`（不注入 AGENTS.md 人格/工作区指令）
@@ -85,7 +87,7 @@ dsh-dreaming/
 ## 验证
 
 ```
-node test/v2-unit.test.mjs   # 14 项：store 迁移 / 碎片累计 / 信号晋升 / 预算回收
+node test/v2-unit.test.mjs   # 30 项：store 迁移 / 碎片累计 / 信号晋升 / 预算回收 / 工具 render / 去重
 ```
 
 手动触发一次梦境：POST 到 `http://127.0.0.1:3080/dsh-dreaming/runNow`，信封 `{"type":"client-request","rpcId":"x","method":"runNow","payload":{}}`。检查 `/var/log/dsh-web.log` 的 `[dr]` 日志与 `~/.dsh/dreaming.db`。
