@@ -8,7 +8,8 @@
 import { DreamStore, similarity } from "../lib/store.mjs";
 import { DreamEngine, stripMeta } from "../lib/dream-engine.mjs";
 import { renderDreams } from "../lib/dream-render.mjs";
-import { writeFile, readFile, rm } from "node:fs/promises";
+import { writeFile, readFile } from "node:fs/promises";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -64,7 +65,10 @@ rmSyncRec(dbPath);
   ok("stripMeta：无元数据文本不变", plain === "今天小飞机预产期重新估算为8月18到20日", plain);
 }
 
-function rmSyncRec(p) { try { rm(p, { force: true }); } catch {} }
+// 2026-10-27 修：原来用异步 rm(p,{force:true}) 删目录——缺 recursive 会 reject，
+// 且没 await ⇒ unhandled rejection。以前靠 process.exit 抢先退出盖住了，
+// 把测试挪到 exit 之前就暴露了。改用真同步的 rmSync。
+function rmSyncRec(p) { try { rmSync(p, { force: true, recursive: true }); } catch {} }
 
 // 2. 主测试：新库
 { 
@@ -94,24 +98,64 @@ function rmSyncRec(p) { try { rm(p, { force: true }); } catch {} }
   const stat3 = store.getRecallStat("mem-3");
   ok("prepareFragments：单查询唯一", stat3 && stat3.unique_queries === 1);
 
-  // promoteBySignals：模拟 dedupeRecalls 输出（带 recallCount）
-  const dedupedRecs = [
-    { id: "mem-1", text: records[0].text, entities: records[0].entities, score: 1.1, day: "2026-08-18", recallCount: 2, uniqueQueries: 2, querySet: new Set(["a", "b"]) },
-    { id: "mem-2", text: records[2].text, entities: records[2].entities, score: 0.95, day: "2026-08-16", recallCount: 1, uniqueQueries: 1, querySet: new Set(["a"]) },
-    { id: "mem-3", text: records[3].text, entities: records[3].entities, score: 0.5, day: "2026-08-17", recallCount: 1, uniqueQueries: 1, querySet: new Set(["a"]) },
+  // ── promoteBySignals：2026-10-27 重写为 LLM 提炼驱动 ─────────────────
+  // 旧测试验证的是 v2「信号驱动」（uniqueQueries 门槛 + 量化评分），已随 Hindsight
+  // 移除而失效：通道语义 9-29 从「4 个语义查询」变成「4 个取材来源」后数据源互斥，
+  // uniqueQueries 恒为 1，门槛永远过不了（实证：9-26 起零晋升）。
+  // 新行为：只认 daily 碎片 → 交给 LLM 提炼 → LLM 失败则跳过（不降级到规则截取）。
+  // 注意：daily 现在从第二个参数 allRecords 取（不是 fragments）——因为 fragments
+  // 已被 FRAGMENT_CAP=12 截断，而排序把「今天」排最前、fromMessages 的 day 也是今天，
+  // 48 条今日对话会挤满名额、daily 一条不剩。2026-10-27 实测踩到过这个坑。
+  const dailyFrags = [
+    { id: "daily:2026-08-17:0", text: "今天学到：日级聚合会撒谎，描述今天要用逐小时数据", score: 0.9 },
+    { id: "msg:42", text: "助手更新了某个文件，这是动作流水，不该晋升", score: 0.6 },
   ];
-  // 第一次：promotions 表空 → mem-1（双查询命中）入选，单查询被门槛拦下
-  const promotions1 = await engine.promoteBySignals([], dedupedRecs, "2026-08-18");
-  ok("promoteBySignals：mem-1（双查询命中）入选", promotions1.length >= 1 && promotions1[0].content.includes("小飞机"), JSON.stringify(promotions1));
-  ok("promoteBySignals：单查询命中（mem-2/mem-3）被门槛拦下", promotions1.length === 1, `got ${promotions1.length}`);
+  const origLlm = engine.extractInsightsByLlm.bind(engine);
 
-  // 第二次：预置重复内容 → 同主题被类似度查重拦截（用与产品相同的 extractInsight 输出格式）
+  // ① 无 daily 碎片 → 直接返回空，且完全不调用 LLM
+  let llmCalled = 0;
+  engine.extractInsightsByLlm = async () => { llmCalled++; return [{ type: "lesson", content: "x" }]; };
+  const noDaily = await engine.promoteBySignals([], [dailyFrags[1]], "2026-08-18");
+  ok("promoteBySignals：无 daily 碎片时返回空", noDaily.length === 0, JSON.stringify(noDaily));
+  ok("promoteBySignals：无 daily 碎片时不调用 LLM", llmCalled === 0, `called ${llmCalled} 次`);
+
+  // ② 有 daily + LLM 返回 2 条 → 采纳 2 条；msg: 碎片不得喂给 LLM
+  let capturedText = "";
+  engine.extractInsightsByLlm = async (text) => {
+    capturedText = text;
+    return [
+      { type: "lesson", content: "日级聚合会撒谎，描述今天要用逐小时数据" },
+      { type: "fact", content: "土壤补偿参数 k=0.71" },
+    ];
+  };
+  const got = await engine.promoteBySignals([], dailyFrags, "2026-08-18");
+  ok("promoteBySignals：LLM 返回 2 条 → 采纳 2 条", got.length === 2, JSON.stringify(got));
+  ok("promoteBySignals：带 type 标记与 llm- 前缀 rule",
+    got[0]?.type === "lesson" && got[0]?.rule === "llm-lesson", JSON.stringify(got[0]));
+  ok("promoteBySignals：只把 daily 碎片喂给 LLM（msg: 被排除）",
+    capturedText.includes("日级聚合") && !capturedText.includes("助手更新了某个文件"));
+
+  // ③ LLM 提炼失败（null）→ 跳过晋升，绝不降级到 extractInsight 的取最长句
+  engine.extractInsightsByLlm = async () => null;
+  const failed = await engine.promoteBySignals([], dailyFrags, "2026-08-18");
+  ok("promoteBySignals：LLM 提炼失败 → 跳过晋升（不降级）", failed.length === 0, JSON.stringify(failed));
+
+  // ④ 与已晋升内容重复 → 跳过
   const dupContent = "小飞机预产期重新估算为8月18到20日，父亲是雪球，全家都在等小猫落地";
   store.addPromotion({ dreamId: 1, content: dupContent, target: "MEMORY.md", evidence: "t", rule: "t" });
   const dup = store.findPromotionSimilar(dupContent, 0.85);
   ok("promoteBySignals：重复内容被 similar 拦截（表内已有）", dup !== null);
-  const promotions2 = await engine.promoteBySignals([], dedupedRecs, "2026-08-18");
-  ok("promoteBySignals：重复主题被跳过（promotions2 为空）", promotions2.length === 0, JSON.stringify(promotions2));
+  engine.extractInsightsByLlm = async () => [{ type: "lesson", content: dupContent }];
+  const deduped2 = await engine.promoteBySignals([], dailyFrags, "2026-08-18");
+  ok("promoteBySignals：与已晋升内容重复的跳过", deduped2.length === 0, JSON.stringify(deduped2));
+
+  // ⑤ LLM 返回空数组（确实没有值得记的）→ 不晋升
+  engine.extractInsightsByLlm = async () => [];
+  const empty = await engine.promoteBySignals([], dailyFrags, "2026-08-18");
+  ok("promoteBySignals：LLM 返回空数组 → 不晋升", empty.length === 0);
+
+  // 恢复真实实现，避免污染后续测试
+  engine.extractInsightsByLlm = origLlm;
 
   // compactMemoryForBudget：构造 > budgetBytes（默认 128KB）混合文件（手写段 + 多个标记段）
   const hand = "# MEMORY.md\n\n## 稳定区\n\n用户手写的重要信息，绝对不能删。\n\n噗嗤，这段也是手写的，很重要。\n\n".repeat(1012);
@@ -156,5 +200,43 @@ function rmSyncRec(p) { try { rm(p, { force: true }); } catch {} }
 }
 
 await rmSyncRec(dir);
+
+// 6. appendPromotionsToMemory 同日合并（2026-10-27）：
+//    原来无条件 appendFile 新段，同一天跑两次就出现两个同名
+//    `## YYYY-MM-DD — 梦境沉淀` 段。现在同一天应并入已有段。
+//    ⚠️ 这段必须写在 process.exit 之前；且顶层 await 不能放在 {} block 里
+//    （ESM 只允许模块顶层的 await）。
+const fsP = await import("node:fs/promises");
+const mergeTmp = join(tmpdir(), `mem-merge-${Date.now()}.md`);
+await fsP.writeFile(mergeTmp, "# 手写头部\n\n## 2026-10-26 — 别的段\n\n- 旧内容\n", "utf8");
+const mergeFake = {
+  memoryPath: mergeTmp,
+  budgetBytes: 131072,
+  log: { info: () => {}, warn: () => {} },
+  compactMemoryForBudget: async () => {},
+};
+const mergeProto = DreamEngine.prototype;
+const MERGE_H = "## 2026-10-27 — 梦境沉淀（dsh-dreaming）";
+
+await mergeProto.appendPromotionsToMemory.call(mergeFake, "2026-10-27", 89, [
+  { type: "lesson", content: "第一条" },
+  { type: "fact", content: "第二条" },
+]);
+let mergeText = await fsP.readFile(mergeTmp, "utf8");
+ok("同日合并：首次写入新建段", mergeText.includes(MERGE_H), mergeText);
+ok("同日合并：段内 2 条", (mergeText.match(/^- \[/gm) || []).length === 2, mergeText);
+
+await mergeProto.appendPromotionsToMemory.call(mergeFake, "2026-10-27", 91, [{ type: "lesson", content: "第三条" }]);
+mergeText = await fsP.readFile(mergeTmp, "utf8");
+ok("同日合并：同名段仍只有 1 个", (mergeText.match(/## 2026-10-27 — 梦境沉淀/g) || []).length === 1, mergeText);
+ok("同日合并：条目累加到 3 条", (mergeText.match(/^- \[/gm) || []).length === 3, mergeText);
+ok("同日合并：手写段未被破坏", mergeText.includes("# 手写头部") && mergeText.includes("旧内容"), mergeText);
+
+await mergeProto.appendPromotionsToMemory.call(mergeFake, "2026-10-28", 92, [{ type: "rule", content: "第四条" }]);
+mergeText = await fsP.readFile(mergeTmp, "utf8");
+ok("同日合并：不同日期新建段", (mergeText.match(/## 2026-10-28 — 梦境沉淀/g) || []).length === 1, mergeText);
+ok("同日合并：前一天的段保留", mergeText.includes(MERGE_H), mergeText);
+await fsP.unlink(mergeTmp);
+
 console.log(`\n结果：${pass} 通过，${fail} 失败`);
 process.exit(fail > 0 ? 1 : 0);
