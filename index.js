@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { DreamEngine } from "./lib/dream-engine.mjs";
 import { applyMemory } from "./lib/memory.mjs";
 import { applyPromptInjection } from "./lib/inject.mjs";
+import { applyNudge } from "./lib/nudge.mjs";
 import { DEFAULT_DB_PATH } from "./lib/db.mjs";
 import { DreamStore } from "./lib/store.mjs";
 import { renderDreams } from "./lib/dream-render.mjs";
@@ -59,6 +60,16 @@ export const Config = z.object({
   memoryVerbose: z.boolean().default(true),
   /** 提炼（梦境）总开关 —— 与对话落库独立，关掉梦境不影响检索。 */
   dreamingEnabled: z.boolean().default(true),
+
+  // ── 以下 3 项 2026-11-20 加：nudge（对话中途沉淀）──────────────────────
+  // 补的是记忆链路的前半段：原始对话 → daily。梦境只从 daily 取材，
+  // 而 daily 一直靠主会话自觉写（三天 3 份、四个工作区里三个一份没有）。
+  /** nudge 总开关。关掉只停中途沉淀，梦境与检索照跑。 */
+  nudgeEnabled: z.boolean().default(true),
+  /** 累计多少轮触发一次（turn/end 计数）。0 或负数 = 用默认 10。 */
+  nudgeTurnThreshold: z.number().default(10),
+  /** 同一会话两次 nudge 的最小间隔（分钟）—— 防抖，避免工具密集的 turn 刷触发。 */
+  nudgeMinGapMin: z.number().default(5),
 });
 
 // ── Typert wire schemas（宽松 parse，同 imessage 插件） ──────────────────────
@@ -236,6 +247,20 @@ export function apply(ctx, config) {
     applyPromptInjection(ctx, log);
   } catch (e) {
     log.error(`记忆注入层加载失败（不影响落库与梦境）：${e instanceof Error ? e.message : e}`);
+  }
+
+  // ── nudge（P4）：对话进行中把值得记的抄进 memory/daily ─────────────────
+  // 只写 daily，不碰 MEMORY.md / USER.md —— 那两份走梦境那条带门控的慢车道。
+  // 任何异常都吞在内部：它是旁路，不该影响对话。
+  try {
+    applyNudge(ctx, {
+      enabled: config?.nudgeEnabled !== false,
+      turnThreshold: Number(config?.nudgeTurnThreshold) > 0 ? Number(config.nudgeTurnThreshold) : 10,
+      minGapMs: (Number(config?.nudgeMinGapMin) > 0 ? Number(config.nudgeMinGapMin) : 5) * 60 * 1000,
+      workspace: config?.workspace?.get?.() ?? config?.workspace ?? "",
+    }, log);
+  } catch (e) {
+    log.error(`nudge 加载失败（不影响落库、注入与梦境）：${e instanceof Error ? e.message : e}`);
   }
 
   // 0.1.7：配置即插件 Config 的 volatile 字段，这里适配出等价的 scope 外壳。

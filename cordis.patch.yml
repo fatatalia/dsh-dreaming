@@ -123,3 +123,71 @@
                 多条就多个对象，最多 3 条。按重要性排序。没有就输出 []
               complete: true
               includeRuntimeContext: false
+  
+# ── memory-curator preset（声明式，2026-11-20 加）──────────────────────────────
+#
+# 用途：nudge 的提炼。对话进行中每 N 轮跑一次，把「以后还有用」的东西抄进
+# memory/daily —— 补上 dream-engine 之前的空档（它只从 daily 取材，而 daily
+# 一直靠主会话自觉写）。
+#
+# 与 dream-insight 的区别（别混用）：
+#   dream-insight 看的是已经沉淀过的 daily 碎片，任务是「精炼」，标准严 ——
+#   三个月后没用的直接扔。
+#   memory-curator 看的是原始对话混着工具输出，任务是「不遗漏」，标准松 ——
+#   它写进 daily 的东西后面还要过梦境和 curate 门控，这里漏掉才是损失。
+#   所以它多一个 todo 类型（对话里说的"回头要办的事"），dream-insight 没有。
+#
+# 为什么无工具：模型只返回 JSON，写文件由 nudge.mjs 的代码做。给它 write
+# 权限等于让它绕过所有预算和门控。（complete:true 的裸上下文天然没工具。）
+#
+# order 取 12：紧跟 dream-insight 的 11，三个都是引擎内部专用、不面向用户。
+- insert:
+    - id: preset-memory-curator
+      name: '@deepseek-ai/dsh-agent-preset'
+      config:
+        id: memory-curator
+        name: '对话沉淀 (Memory Curator)'
+        description: 'dsh-dreaming nudge 专用——裸上下文对话提炼预设：从进行中的对话里抄出以后还有用的东西，只输出 JSON 数组，无任何工具。素材由 nudge 引擎预取后经 user message 注入。'
+        order: 12
+        plugins:
+          - id: persona
+            name: '@deepseek-ai/dsh-persona'
+            config:
+              prefix: |-
+                你在给一段进行中的对话做笔记。不是总结，是抄。
+
+                这段对话还在继续。你要做的：把它里面**以后还能用上**的东西捞出来。
+
+                判断标准：下次遇到同样的事，这条能帮上忙吗？能，就抄；不能，扔掉。
+
+                该抄的：
+                - 「容器要换成 openjdk，因为 JDK 版本对不上」—— 事实，抄
+                - 「改账本前先备份，改完必须用 loader.load_file 校验」—— 纪律，抄
+                - 「日级聚合会撒谎，描述"今天"必须用逐小时数据」—— 认知，抄
+                - 「回头要把 xc 测试环境的网工单提了」—— 待办，抄
+
+                不该抄的：
+                - 「我读了 xxx 文件」「已经改完了」「重启好了」—— 动作，扔
+                - 「调用了 memory_search 工具」「返回了 47 条结果」—— 流水，扔
+                - 「用户问了一个问题，我回答了」—— 空话，扔
+                - 「通过这件事我明白了……」—— 升华，扔
+
+                判据：**动作是谁做的、文件写到哪、用了什么工具、跑了几次——全不算。**
+                笔记记的是「以后该怎么做 / 该知道什么」，不是「刚才发生了什么」。
+
+                分四类：
+                - lesson：踩的坑、教训、某个做法为什么错
+                - fact：稳定的事实、配置、路径、参数
+                - rule：该长期遵守的准则（很少见）
+                - todo：明确说了要做、但还没做的事
+
+                **宁多勿少。** 你的笔记是草稿，后面还有一道工序会精炼它。
+                拿不准的，抄下来；漏掉的，就再也找不回来了。
+                但也不要凑数——真的没有，返回空数组。
+
+                输出格式（严格遵守，不要加解释、不要加 markdown 代码块标记）：
+                [{"type":"fact","content":"一句话，不超过 60 字"}]
+
+                最多 3 条，按重要性排序。没有就输出 []
+              complete: true
+              includeRuntimeContext: false
