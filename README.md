@@ -126,8 +126,62 @@ dsh-dreaming/
 | 含 CJK，且**每个 token** 都 ≥3 个 CJK 字 | `messages_fts_trigram` | `bm25()` |
 | 含 CJK，且有 token <3 个 CJK 字 | LIKE 全扫，**每 token 一子句、OR 连接** | `timestamp DESC` |
 
-`memory_search` 结果里的「检索方式」回报的是**实际走的路径**（`fts` / `fts-trigram` / `like`），
-不是按查询长度猜的。
+`memory_search` 结果里的「检索方式」回报的是**实际走的路径**，不是按查询长度猜的：
+
+| `via` | 含义 |
+|---|---|
+| `fts` | unicode61 索引命中 |
+| `fts-trigram` | trigram 索引命中 |
+| `fts-relaxed` | AND 零命中后放宽成「命中任一词」才找到的（见下） |
+| `like` | 子串全扫 |
+| `like-fts-stale` | FTS 索引报了错，自动降级到子串全扫 |
+
+### 查询语法
+
+与 FTS5 同构的一个子集，`parseQuery()` 解析一次，FTS 和 LIKE 两处共用（否则会出现
+「fts 搜得到、like 搜不到」）：
+
+| 写法 | 语义 |
+|---|---|
+| `梦境 注入` | 空格 = **隐含 AND** |
+| `广西 OR 桂林` | **OR 开新组**，命中任一组即可 |
+| `鸭掌木 NOT 换盆` | **NOT 排除**下一个词 |
+| `"记忆注入"` | 引号内整串是一个**短语**，要求连续出现 |
+| `memo*` | **前缀匹配**（仅非 CJK —— trigram 会把 `*` 当字面星号） |
+
+组内 AND、组间 OR：`A B OR C D` → `(A 且 B) 或 (C 且 D)`，与 FTS5 原生语义一致。
+
+### OR 松弛
+
+多词 AND 查询**零命中**时，自动重试成「命中任一词」（Hermes `_or_relaxed_query`）：
+
+```
+查询「hexapod zzznotexist」→ AND 零命中
+  → 重试「hexapod OR zzznotexist」→ 2 条，via=fts-relaxed
+```
+
+**严格限定触发条件**，否则会毁掉用户明确表达的语义：
+
+- 单组、正向词 ≥2（单词没法松弛）
+- 非 CJK（CJK 走 trigram/LIKE，语义不同）
+- 用户没写显式 `OR` / `NOT`
+- 只在**零命中**时触发 —— 有结果就保持精确匹配语义
+
+### 索引陈旧与降级
+
+FTS 查询抛异常时（索引损坏、MATCH 语法不可用），标记该表陈旧 5 分钟，期间直接走 LIKE：
+
+- **按表分别标记**：trigram 坏了不连累 unicode61 的拉丁查询，反之亦然
+- 5 分钟后自动重试，不需要人工介入
+- 降级后 `via` 报 `like-fts-stale`，能看出「这次结果是全扫来的」
+
+### 排序、分页、上下文窗口
+
+| 参数 | 说明 |
+|---|---|
+| `sort` | `rank`（默认，bm25 相关度）/ `newest` / `oldest`。LIKE 路由没有 score，只能按时间 |
+| `offset` | 跳过前 N 条，翻页用 |
+| `context` | `true` 时每条命中附带**前后各一条**消息（Hermes `_CONTEXT_WINDOW_SQL`）。默认关 —— 文本量变约 3 倍 |
 
 **为什么必须分流（实测数据）：**
 
