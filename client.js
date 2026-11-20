@@ -5,11 +5,11 @@
  * 对齐官方 @deepseek-ai/dsh-client-ui-schedule 的做法：
  *   ① main 槽位          —— 页面本体（用 key 关联）
  *   ② sidebar.panellist  —— 左侧菜单项（用 id 关联；与 ① 同一个 id "dreaming"）
- * 点击左侧「梦境」→ main 区域切换到本页面，不再是会话内的一个 Tab。
+ * 点击左侧「梦境记忆」→ main 区域切换到本页面，不再是会话内的一个 Tab。
  *
  * 页面内部再分"梦境日记 / 晋升沉淀"两个子 Tab；梦境日记支持按日期查询，
  * 默认展示今天（凌晨）的梦境，可手工选择日期查看历史。
- * 配置项（provider/model/窗口时间）仍留在 Settings → 梦境，**不搬进页面**。
+ * 配置项（provider/model/窗口时间）仍留在 Settings → 梦境记忆，**不搬进页面**。
  * 数据经 connection.rpc 走 "/dsh-dreaming" 通道。
  */
 window.__ModuleLoader__.load({
@@ -213,7 +213,7 @@ window.__ModuleLoader__.load({
               children: [
                 // 页面标题栏（独立页面的页头；左侧菜单点进来就是这个页面）
                 S.jsxs("div", { style: pageHeading, children: [
-                  S.jsx("h1", { style: h1, children: "🌙 梦境" }),
+                  S.jsx("h1", { style: h1, children: "🌙 梦境记忆" }),
                   S.jsxs("div", { style: { display: "flex", gap: 8, alignItems: "center", flex: "none" }, children: [
                     S.jsx("button", {
                       type: "button",
@@ -325,7 +325,7 @@ window.__ModuleLoader__.load({
     const labelStyle = { flex: "0 0 110px", fontWeight: 500, fontSize: 13 };
     const inputStyle = { flex: 1, padding: "5px 8px", borderRadius: 6, border: "1px solid var(--dsw-alias-divider, #ddd)", background: "var(--dsw-alias-bg-base)", color: "var(--dsw-alias-label-primary)", fontFamily: "inherit" };
 
-    /** Settings → 梦境：默认工作区 + 随机窗口。 */
+    /** Settings → 梦境记忆：默认工作区 + 随机窗口。 */
     function DreamSettings(props) {
       const { getConfig, setConfig, listProviders, listModels } = props;
       const [state, setState] = React.useState({ status: "loading", writable: true });
@@ -545,7 +545,7 @@ window.__ModuleLoader__.load({
     }
 
     function apply(ctx) {
-      // 设置页卡片（Settings → 梦境）—— 配置项留在这里，不搬进独立页面。
+      // 设置页卡片（Settings → 梦境记忆）—— 配置项留在这里，不搬进独立页面。
       const mount = ctx.remote.$mount(CONTRIBUTION);
       const callRemote = async (method, ...args) => {
         await mount;
@@ -565,7 +565,7 @@ window.__ModuleLoader__.load({
             name: "settings.section",
             id: "dreaming",
             order: 26,
-            label: () => "梦境",
+            label: () => "梦境记忆",
             inject: () => ({ getConfig, setConfig, listProviders, listModels }),
           },
           DreamSettings,
@@ -600,7 +600,7 @@ window.__ModuleLoader__.load({
             name: "sidebar.panellist",
             id: PAGE_ID,
             order: 30,
-            label: () => "梦境",
+            label: () => "梦境记忆",
           },
           DreamIcon,
         ),
