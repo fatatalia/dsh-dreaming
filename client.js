@@ -254,7 +254,14 @@ window.__ModuleLoader__.load({
     function DreamSettings(props) {
       const { getConfig, setConfig, listProviders, listModels } = props;
       const [state, setState] = React.useState({ status: "loading", writable: true });
-      const [workspace, setWorkspace] = React.useState("");
+      const [memoryEnabled, setMemoryEnabled] = React.useState(true);
+      const [storeReasoning, setStoreReasoning] = React.useState(false);
+      const [maxPerTurn, setMaxPerTurn] = React.useState(2000);
+      const [memoryVerbose, setMemoryVerbose] = React.useState(true);
+      const [dreamingEnabled, setDreamingEnabled] = React.useState(true);
+      const [nudgeEnabled, setNudgeEnabled] = React.useState(true);
+      const [nudgeTurnThreshold, setNudgeTurnThreshold] = React.useState(10);
+      const [nudgeMinGapMin, setNudgeMinGapMin] = React.useState(5);
       const [provider, setProvider] = React.useState("");
       const [windowStart, setWindowStart] = React.useState("02:00");
       const [windowEnd, setWindowEnd] = React.useState("04:30");
@@ -270,7 +277,14 @@ window.__ModuleLoader__.load({
         let current = true;
         Promise.resolve().then(() => getConfig()).then((cfg) => {
           if (!current) return;
-          setWorkspace(typeof cfg?.workspace === "string" ? cfg.workspace : "");
+          setMemoryEnabled(cfg?.memoryEnabled !== false);
+          setStoreReasoning(cfg?.storeReasoning === true);
+          if (typeof cfg?.maxPerTurn === "number") setMaxPerTurn(cfg.maxPerTurn);
+          setMemoryVerbose(cfg?.memoryVerbose !== false);
+          setDreamingEnabled(cfg?.dreamingEnabled !== false);
+          setNudgeEnabled(cfg?.nudgeEnabled !== false);
+          if (typeof cfg?.nudgeTurnThreshold === "number") setNudgeTurnThreshold(cfg.nudgeTurnThreshold);
+          if (typeof cfg?.nudgeMinGapMin === "number") setNudgeMinGapMin(cfg.nudgeMinGapMin);
           setWindowStart(typeof cfg?.windowStart === "string" ? cfg.windowStart : "02:00");
           setWindowEnd(typeof cfg?.windowEnd === "string" ? cfg.windowEnd : "04:30");
           setProvider(typeof cfg?.provider === "string" ? cfg.provider : "");
@@ -308,7 +322,11 @@ window.__ModuleLoader__.load({
         : ["off", "low", "medium", "high", "max"];
 
       const save = () => {
-        Promise.resolve().then(() => setConfig({ workspace, provider, model, reasoningEffort, windowStart, windowEnd, stepTimeoutSec }))
+        Promise.resolve().then(() => setConfig({
+          provider, model, reasoningEffort, windowStart, windowEnd, stepTimeoutSec,
+          memoryEnabled, storeReasoning, maxPerTurn, memoryVerbose, dreamingEnabled,
+          nudgeEnabled, nudgeTurnThreshold, nudgeMinGapMin,
+        }))
           .then(() => { setSaved(true); setTimeout(() => setSaved(false), 1500); })
           .catch((e) => console.error("dsh-dreaming save failed", e));
       };
@@ -320,12 +338,10 @@ window.__ModuleLoader__.load({
       ] });
 
       const writable = state.writable;
+      const hint = { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 };
+      const groupTitle = { margin: "18px 0 8px", fontWeight: 600, fontSize: 13, color: "var(--dsw-alias-label-secondary)" };
       return S.jsxs("div", { style: { maxWidth: 640, fontFamily: "inherit", fontSize: 14, lineHeight: 1.6 }, children: [
-        S.jsx("p", { style: { color: "var(--dsw-alias-label-secondary)", margin: "0 0 12px" }, children: "梦境在每天凌晨随机窗口内运行一次。设置梦境会话的工作区与随机窗口（本地时间 HH:mm）。" }),
-        S.jsx("div", { style: row, children: [
-          S.jsx("label", { style: labelStyle, children: "默认工作区" }),
-          S.jsx("input", { value: workspace, disabled: !writable, onChange: (e) => setWorkspace(e.target.value), style: inputStyle, placeholder: "/Users/<you>/dsh/mayacode" }),
-        ] }),
+        S.jsx("p", { style: { color: "var(--dsw-alias-label-secondary)", margin: "0 0 12px" }, children: "梦境在每天凌晨随机窗口内运行一次，并从全部工作区取材。窗口为本地时间 HH:mm。" }),
         S.jsxs("div", { style: { display: "flex", gap: 10 }, children: [
           S.jsxs("div", { style: { ...row, flex: 1 }, children: [
             S.jsx("label", { style: labelStyle, children: "窗口开始" }),
@@ -362,6 +378,58 @@ window.__ModuleLoader__.load({
           S.jsx("label", { style: labelStyle, children: "单步超时" }),
           S.jsx("input", { type: "number", min: 0, step: 1, value: stepTimeoutSec, disabled: !writable, onChange: (e) => setStepTimeoutSec(Number(e.target.value) || 0), style: { ...inputStyle, maxWidth: 160 }, placeholder: "0 = 不限制" }),
           S.jsx("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 }, children: "秒，单步（一次模型请求）超过该时长强制中断，0 = 不限制" }),
+        ] }),
+        S.jsx("div", { style: groupTitle, children: "记忆" }),
+        S.jsxs("div", { style: row, children: [
+          S.jsx("label", { style: labelStyle, children: "对话落库" }),
+          S.jsxs("label", { style: { display: "flex", alignItems: "center", gap: 6, cursor: writable ? "pointer" : "default" }, children: [
+            S.jsx("input", { type: "checkbox", checked: memoryEnabled, disabled: !writable, onChange: (e) => setMemoryEnabled(e.target.checked) }),
+            S.jsx("span", { style: hint, children: "把每轮对话存进本地库，供检索" }),
+          ] }),
+        ] }),
+        S.jsxs("div", { style: row, children: [
+          S.jsx("label", { style: labelStyle, children: "记录思考过程" }),
+          S.jsxs("label", { style: { display: "flex", alignItems: "center", gap: 6, cursor: writable ? "pointer" : "default" }, children: [
+            S.jsx("input", { type: "checkbox", checked: storeReasoning, disabled: !writable, onChange: (e) => setStoreReasoning(e.target.checked) }),
+            S.jsx("span", { style: hint, children: "体积大，默认关" }),
+          ] }),
+        ] }),
+        S.jsxs("div", { style: row, children: [
+          S.jsx("label", { style: labelStyle, children: "单轮上限" }),
+          S.jsx("input", { type: "number", min: 1, step: 100, value: maxPerTurn, disabled: !writable, onChange: (e) => setMaxPerTurn(Number(e.target.value) || 2000), style: { ...inputStyle, maxWidth: 160 } }),
+          S.jsx("span", { style: hint, children: "条，单轮最多入库多少条" }),
+        ] }),
+        S.jsxs("div", { style: row, children: [
+          S.jsx("label", { style: labelStyle, children: "落库日志" }),
+          S.jsxs("label", { style: { display: "flex", alignItems: "center", gap: 6, cursor: writable ? "pointer" : "default" }, children: [
+            S.jsx("input", { type: "checkbox", checked: memoryVerbose, disabled: !writable, onChange: (e) => setMemoryVerbose(e.target.checked) }),
+            S.jsx("span", { style: hint, children: "关掉只保留错误日志" }),
+          ] }),
+        ] }),
+        S.jsxs("div", { style: row, children: [
+          S.jsx("label", { style: labelStyle, children: "梦境提炼" }),
+          S.jsxs("label", { style: { display: "flex", alignItems: "center", gap: 6, cursor: writable ? "pointer" : "default" }, children: [
+            S.jsx("input", { type: "checkbox", checked: dreamingEnabled, disabled: !writable, onChange: (e) => setDreamingEnabled(e.target.checked) }),
+            S.jsx("span", { style: hint, children: "每晚从 daily 提炼到 MEMORY.md / USER.md" }),
+          ] }),
+        ] }),
+        S.jsx("div", { style: groupTitle, children: "nudge（对话中途沉淀）" }),
+        S.jsxs("div", { style: row, children: [
+          S.jsx("label", { style: labelStyle, children: "启用" }),
+          S.jsxs("label", { style: { display: "flex", alignItems: "center", gap: 6, cursor: writable ? "pointer" : "default" }, children: [
+            S.jsx("input", { type: "checkbox", checked: nudgeEnabled, disabled: !writable, onChange: (e) => setNudgeEnabled(e.target.checked) }),
+            S.jsx("span", { style: hint, children: "对话进行中把值得记的抄进 memory/daily，只写草稿层" }),
+          ] }),
+        ] }),
+        S.jsxs("div", { style: row, children: [
+          S.jsx("label", { style: labelStyle, children: "触发轮数" }),
+          S.jsx("input", { type: "number", min: 1, step: 1, value: nudgeTurnThreshold, disabled: !writable || !nudgeEnabled, onChange: (e) => setNudgeTurnThreshold(Number(e.target.value) || 10), style: { ...inputStyle, maxWidth: 160 } }),
+          S.jsx("span", { style: hint, children: "轮，累计多少轮对话沉淀一次" }),
+        ] }),
+        S.jsxs("div", { style: row, children: [
+          S.jsx("label", { style: labelStyle, children: "最小间隔" }),
+          S.jsx("input", { type: "number", min: 1, step: 1, value: nudgeMinGapMin, disabled: !writable || !nudgeEnabled, onChange: (e) => setNudgeMinGapMin(Number(e.target.value) || 5), style: { ...inputStyle, maxWidth: 160 } }),
+          S.jsx("span", { style: hint, children: "分钟，同一会话两次沉淀之间至少隔这么久" }),
         ] }),
         S.jsxs("div", { style: { marginTop: 14, display: "flex", gap: 8 }, children: [
           S.jsx("button", { type: "button", disabled: !writable, onClick: save, style: { padding: "6px 14px", borderRadius: 8, cursor: writable ? "pointer" : "default", fontWeight: 500 }, children: saved ? "✓ 已保存" : "保存" }),

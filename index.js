@@ -49,27 +49,27 @@ export const Config = z.object({
   // ── 以下 5 项 2026-11-20 从 dsh-fatatalia-memory 并入 ──────────────────
   // 两插件已合并：dreaming 管梦，memory 管落库与检索，同一个库、同一个进程。
   /** SQLite 库路径（对话 + 梦境共用）。 */
-  dbPath: z.string().default(DEFAULT_DB_PATH),
+  dbPath: z.string().default(DEFAULT_DB_PATH).volatile(),
   /** 对话落库总开关。梦境开关另见 dreamingEnabled。 */
-  memoryEnabled: z.boolean().default(true),
+  memoryEnabled: z.boolean().default(true).volatile(),
   /** 是否把 assistant 的 reasoning 也入库（体积大，默认关）。 */
-  storeReasoning: z.boolean().default(false),
+  storeReasoning: z.boolean().default(false).volatile(),
   /** 单个 turn 最多入库多少条（防御性上限，超出部分下轮续）。 */
-  maxPerTurn: z.number().default(2000),
+  maxPerTurn: z.number().default(2000).volatile(),
   /** 落库与检索的日志详细程度。 */
-  memoryVerbose: z.boolean().default(true),
+  memoryVerbose: z.boolean().default(true).volatile(),
   /** 提炼（梦境）总开关 —— 与对话落库独立，关掉梦境不影响检索。 */
-  dreamingEnabled: z.boolean().default(true),
+  dreamingEnabled: z.boolean().default(true).volatile(),
 
   // ── 以下 3 项 2026-11-20 加：nudge（对话中途沉淀）──────────────────────
   // 补的是记忆链路的前半段：原始对话 → daily。梦境只从 daily 取材，
   // 而 daily 一直靠主会话自觉写（三天 3 份、四个工作区里三个一份没有）。
   /** nudge 总开关。关掉只停中途沉淀，梦境与检索照跑。 */
-  nudgeEnabled: z.boolean().default(true),
+  nudgeEnabled: z.boolean().default(true).volatile(),
   /** 累计多少轮触发一次（turn/end 计数）。0 或负数 = 用默认 10。 */
-  nudgeTurnThreshold: z.number().default(10),
+  nudgeTurnThreshold: z.number().default(10).volatile(),
   /** 同一会话两次 nudge 的最小间隔（分钟）—— 防抖，避免工具密集的 turn 刷触发。 */
-  nudgeMinGapMin: z.number().default(5),
+  nudgeMinGapMin: z.number().default(5).volatile(),
 });
 
 // ── Typert wire schemas（宽松 parse，同 imessage 插件） ──────────────────────
@@ -180,31 +180,49 @@ class DreamingService extends TypertRemoteService {
   getConfig() {
     const snap = this.scope.get();
     return {
-      workspace: typeof snap?.workspace === "string" ? snap.workspace : "",
+      // workspace 不再暴露：素材召回已跨全部工作区，这里只剩「内部兜底目录」的语义，
+      // 摆到设置页会让人以为「梦境只看这个工作区」。Config 里仍保留该字段。
       windowStart: typeof snap?.windowStart === "string" ? snap.windowStart : "02:00",
       windowEnd: typeof snap?.windowEnd === "string" ? snap.windowEnd : "04:30",
       provider: typeof snap?.provider === "string" ? snap.provider : "",
       model: typeof snap?.model === "string" ? snap.model : "",
       reasoningEffort: typeof snap?.reasoningEffort === "string" ? snap.reasoningEffort : "high",
       stepTimeoutSec: typeof snap?.stepTimeoutSec === "number" && snap.stepTimeoutSec > 0 ? snap.stepTimeoutSec : 0,
+      // ── 记忆（2026-11-20 并入）──
+      memoryEnabled: snap?.memoryEnabled !== false,
+      storeReasoning: snap?.storeReasoning === true,
+      maxPerTurn: typeof snap?.maxPerTurn === "number" && snap.maxPerTurn > 0 ? snap.maxPerTurn : 2000,
+      memoryVerbose: snap?.memoryVerbose !== false,
+      dreamingEnabled: snap?.dreamingEnabled !== false,
+      // ── nudge（对话中途沉淀）──
+      nudgeEnabled: snap?.nudgeEnabled !== false,
+      nudgeTurnThreshold: typeof snap?.nudgeTurnThreshold === "number" && snap.nudgeTurnThreshold > 0 ? snap.nudgeTurnThreshold : 10,
+      nudgeMinGapMin: typeof snap?.nudgeMinGapMin === "number" && snap.nudgeMinGapMin > 0 ? snap.nudgeMinGapMin : 5,
       writable: true,
     };
   }
 
   async setConfig(payload) {
     const patch = {};
-    if (typeof payload?.workspace === "string") patch.workspace = payload.workspace;
     if (typeof payload?.windowStart === "string") patch.windowStart = payload.windowStart;
     if (typeof payload?.windowEnd === "string") patch.windowEnd = payload.windowEnd;
     if (typeof payload?.provider === "string") patch.provider = payload.provider;
     if (typeof payload?.model === "string") patch.model = payload.model;
     if (typeof payload?.reasoningEffort === "string") patch.reasoningEffort = payload.reasoningEffort;
     if (typeof payload?.stepTimeoutSec === "number") patch.stepTimeoutSec = payload.stepTimeoutSec > 0 ? payload.stepTimeoutSec : 0;
+    // 记忆与 nudge：类型校验后落，非法值忽略（不静默写成 0/false）。
+    if (typeof payload?.memoryEnabled === "boolean") patch.memoryEnabled = payload.memoryEnabled;
+    if (typeof payload?.storeReasoning === "boolean") patch.storeReasoning = payload.storeReasoning;
+    if (typeof payload?.maxPerTurn === "number" && payload.maxPerTurn > 0) patch.maxPerTurn = Math.floor(payload.maxPerTurn);
+    if (typeof payload?.memoryVerbose === "boolean") patch.memoryVerbose = payload.memoryVerbose;
+    if (typeof payload?.dreamingEnabled === "boolean") patch.dreamingEnabled = payload.dreamingEnabled;
+    if (typeof payload?.nudgeEnabled === "boolean") patch.nudgeEnabled = payload.nudgeEnabled;
+    if (typeof payload?.nudgeTurnThreshold === "number" && payload.nudgeTurnThreshold > 0) patch.nudgeTurnThreshold = Math.floor(payload.nudgeTurnThreshold);
+    if (typeof payload?.nudgeMinGapMin === "number" && payload.nudgeMinGapMin > 0) patch.nudgeMinGapMin = Math.floor(payload.nudgeMinGapMin);
     if (Object.keys(patch).length === 0) return { ok: true };
     await this.scope.update(patch);
     // 热更新引擎（工作区/窗口/思考等级 + 重排下一次）。
     this.engine.setConfig({
-      workspace: patch.workspace,
       provider: patch.provider,
       model: patch.model,
       reasoningEffort: patch.reasoningEffort,
@@ -254,10 +272,13 @@ export function apply(ctx, config) {
   // 任何异常都吞在内部：它是旁路，不该影响对话。
   try {
     applyNudge(ctx, {
-      enabled: config?.nudgeEnabled !== false,
-      turnThreshold: Number(config?.nudgeTurnThreshold) > 0 ? Number(config.nudgeTurnThreshold) : 10,
-      minGapMs: (Number(config?.nudgeMinGapMin) > 0 ? Number(config.nudgeMinGapMin) : 5) * 60 * 1000,
-      workspace: config?.workspace?.get?.() ?? config?.workspace ?? "",
+      // 传 getter 而不是值：设置页改完立刻生效，无需重启。
+      getConfig: () => ({
+        enabled: config?.nudgeEnabled?.get?.() !== false,
+        turnThreshold: Number(config?.nudgeTurnThreshold?.get?.()) > 0 ? Number(config.nudgeTurnThreshold.get()) : 10,
+        minGapMs: (Number(config?.nudgeMinGapMin?.get?.()) > 0 ? Number(config.nudgeMinGapMin.get()) : 5) * 60 * 1000,
+      }),
+      workspace: config?.workspace?.get?.() ?? "",
     }, log);
   } catch (e) {
     log.error(`nudge 加载失败（不影响落库、注入与梦境）：${e instanceof Error ? e.message : e}`);
@@ -275,6 +296,16 @@ export function apply(ctx, config) {
       model: config.model.get(),
       reasoningEffort: config.reasoningEffort.get(),
       stepTimeoutSec: config.stepTimeoutSec.get(),
+      // 2026-11-20 并入的两组配置：设置页要读写，热改了要能生效。
+      dbPath: config.dbPath.get(),
+      memoryEnabled: config.memoryEnabled.get(),
+      storeReasoning: config.storeReasoning.get(),
+      maxPerTurn: config.maxPerTurn.get(),
+      memoryVerbose: config.memoryVerbose.get(),
+      dreamingEnabled: config.dreamingEnabled.get(),
+      nudgeEnabled: config.nudgeEnabled.get(),
+      nudgeTurnThreshold: config.nudgeTurnThreshold.get(),
+      nudgeMinGapMin: config.nudgeMinGapMin.get(),
     }),
     async update(patch) {
       const editor = ctx.get("configEditor");
