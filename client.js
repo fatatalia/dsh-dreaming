@@ -39,6 +39,7 @@ window.__ModuleLoader__.load({
       return {
         listDreams: (opts) => call("listDreams", opts || {}),
         listPromotions: () => call("listPromotions", {}),
+        memoryStatus: () => call("memoryStatus", {}),
         runNow: () => call("runNow", {}),
       };
     }
@@ -92,11 +93,73 @@ window.__ModuleLoader__.load({
       cursor: "pointer",
     });
 
+    const fmtB = (n) => (typeof n === "number" && n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n || 0} B`);
+
+    /** 「记忆注入」子 Tab：只读快照，显示 system prompt 里实际注入了什么。 */
+    function MemoryPanel({ data }) {
+      if (data === null) return S.jsx("p", { style: empty, children: "加载中…" });
+      const m = data;
+      const budget = m.budgetBytes || 10240;
+      const errColor = "var(--dsw-alias-state-error-primary, #d33)";
+      const bar = (pct, danger) => S.jsx("div", {
+        style: { height: 6, borderRadius: 3, background: "var(--dsw-alias-bg-l2, #e8e8e8)", overflow: "hidden", marginTop: 6 },
+        children: S.jsx("div", {
+          style: {
+            width: `${Math.min(100, Math.max(0, pct))}%`,
+            height: "100%",
+            background: danger ? errColor : "var(--dsw-alias-state-success-primary, #4caf50)",
+          },
+        }),
+      });
+      return S.jsxs("div", { children: [
+        S.jsxs("div", { style: card, children: [
+          S.jsx("div", { style: title, children: "MEMORY.md —— 公共环境事实" }),
+          S.jsx("div", { style: meta, children: `${m.memoryPath || ""} · ${fmtB(m.memoryBytes)} / 上限 ${fmtB(budget)}` }),
+          bar((m.memoryBytes / budget) * 100, m.memoryBytes > budget * 0.9),
+        ]}),
+        S.jsxs("div", { style: card, children: [
+          S.jsx("div", { style: title, children: "USER.md —— 各工作区个人事实" }),
+          S.jsx("div", { style: { ...meta, marginBottom: 4 }, children: "MEMORY + USER 合计必须 ≤ 上限，超了截断 USER 并告警" }),
+          (m.workspaces || []).length === 0 ? S.jsx("div", { style: empty, children: "没有找到工作区 USER.md" }) :
+            m.workspaces.map((w) => S.jsxs("div", { key: w.name, style: { marginTop: 12 }, children: [
+              S.jsxs("div", { style: { display: "flex", justifyContent: "space-between", fontSize: 13, gap: 12 }, children: [
+                S.jsx("span", { style: { fontWeight: 500 }, children: w.name }),
+                S.jsx("span", {
+                  style: { color: (w.impossible || w.truncated) ? errColor : "var(--dsw-alias-label-secondary)" },
+                  children: `${fmtB(w.userBytes)} · 合计 ${fmtB(w.totalBytes)} · 余 ${fmtB(Math.max(0, w.headroomBytes))}`,
+                }),
+              ] }),
+              bar((w.totalBytes / budget) * 100, w.impossible || w.truncated),
+              w.impossible ? S.jsx("div", { style: { fontSize: 12, color: errColor, marginTop: 4 }, children: "MEMORY 独占预算，USER 完全放不进" }) : null,
+              w.truncated ? S.jsx("div", { style: { fontSize: 12, color: errColor, marginTop: 4 }, children: "超预算，正在截断注入" }) : null,
+            ] })),
+        ]}),
+        S.jsxs("div", { style: card, children: [
+          S.jsxs("div", { style: title, children: [`冻结中的会话 ${(m.cacheEntries || []).length} / ${m.maxCacheEntries || 0}`] }),
+          S.jsx("div", { style: { ...meta, marginBottom: 4 }, children: "同一会话只读一次盘；压缩结束后作废，下一轮重新读取" }),
+          (m.cacheEntries || []).length === 0 ? S.jsx("div", { style: empty, children: "暂无" }) :
+            m.cacheEntries.map((e) => S.jsxs("div", {
+              style: { fontSize: 12, color: "var(--dsw-alias-label-secondary)", marginTop: 4, wordBreak: "break-all" },
+              children: [S.jsx("code", { children: e.sessionId }), ` · ${fmtB(e.bytes)} · ${e.cwd || "（无 cwd）"}`],
+            })),
+        ]}),
+        S.jsxs("details", { style: card, children: [
+          S.jsx("summary", { style: { ...title, cursor: "pointer", marginBottom: 0 }, children: "展开 MEMORY.md 正文" }),
+          S.jsx("pre", { style: { ...body, fontSize: 12, marginTop: 10, marginBottom: 0 }, children: m.memoryText || "（空）" }),
+        ]}),
+        (m.workspaces || []).map((w) => S.jsxs("details", { key: `d-${w.name}`, style: card, children: [
+          S.jsx("summary", { style: { ...title, cursor: "pointer", marginBottom: 0 }, children: `展开 ${w.name}/USER.md 正文` }),
+          S.jsx("pre", { style: { ...body, fontSize: 12, marginTop: 10, marginBottom: 0 }, children: w.userText || "（空）" }),
+        ] })),
+      ] });
+    }
+
     function DreamView({ runtime }) {
-      const [tab, setTab] = React.useState("dreams"); // "dreams" | "promotions"
+      const [tab, setTab] = React.useState("dreams"); // "dreams" | "promotions" | "memory"
       const [date, setDate] = React.useState(todayStr());
       const [dreams, setDreams] = React.useState(null);
       const [promotions, setPromotions] = React.useState(null);
+      const [memory, setMemory] = React.useState(null);
       const [error, setError] = React.useState("");
       const [busy, setBusy] = React.useState(false);
       const [tick, setTick] = React.useState(0);
@@ -120,6 +183,17 @@ window.__ModuleLoader__.load({
           .catch((e) => { if (current) setError(e.message); });
         return () => { current = false; };
       }, [runtime, tick]);
+
+      // 记忆注入快照：只在切到该 Tab 时拉取。
+      React.useEffect(() => {
+        if (tab !== "memory") return;
+        let current = true;
+        setMemory(null);
+        runtime.memoryStatus()
+          .then((m) => { if (current) { setMemory(m || null); setError(""); } })
+          .catch((e) => { if (current) setError(e.message); });
+        return () => { current = false; };
+      }, [runtime, tab, tick]);
 
       const triggerDream = () => {
         setBusy(true);
@@ -162,6 +236,7 @@ window.__ModuleLoader__.load({
           S.jsxs("div", { style: { display: "flex", gap: 8, marginBottom: 16 }, children: [
             S.jsx("button", { type: "button", onClick: () => setTab("dreams"), style: tabBtn(tab === "dreams"), children: "梦境日记" }),
             S.jsx("button", { type: "button", onClick: () => setTab("promotions"), style: tabBtn(tab === "promotions"), children: `晋升沉淀${promotions && promotions.length ? ` (${promotions.length})` : ""}` }),
+            S.jsx("button", { type: "button", onClick: () => setTab("memory"), style: tabBtn(tab === "memory"), children: "记忆注入" }),
           ]}),
 
           tab === "dreams" ? S.jsxs("div", { children: [
@@ -184,14 +259,14 @@ window.__ModuleLoader__.load({
                   S.jsx("div", { style: meta, children: `#${d.id} · ${new Date(d.created_at).toLocaleString("zh-CN")}` }),
                   S.jsx("div", { style: body, children: d.content }),
                 ] })),
-          ]}) : S.jsxs("div", { children: [
+          ]}) : tab === "promotions" ? S.jsxs("div", { children: [
             !promotions ? S.jsx("p", { style: empty, children: "加载中…" }) :
               promotions.length === 0 ? S.jsx("p", { style: empty, children: "暂无晋升记录。" }) :
                 promotions.map((p) => S.jsxs("div", { key: p.id, style: card, children: [
                   S.jsx("div", { style: meta, children: `${p.dream_date || "—"} · ${p.target}` }),
                   S.jsx("div", { style: body, children: p.content }),
                 ] })),
-              ]}),
+              ]}) : S.jsx(MemoryPanel, { data: memory }),
               ],
             }),
           }),

@@ -15,7 +15,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { DreamEngine } from "./lib/dream-engine.mjs";
 import { applyMemory } from "./lib/memory.mjs";
-import { applyPromptInjection } from "./lib/inject.mjs";
+import { applyPromptInjection, memoryStatus } from "./lib/inject.mjs";
 import { applyNudge } from "./lib/nudge.mjs";
 import { DEFAULT_DB_PATH } from "./lib/db.mjs";
 import { DreamStore } from "./lib/store.mjs";
@@ -416,6 +416,10 @@ export function apply(ctx, config) {
           // 手动触发一次梦境（异步执行，立即返回）。
           engine.runOnce().catch((e) => log.error(`dreaming: 手动触发失败 ${e instanceof Error ? e.message : e}`));
           return { ok: true, value: { started: true } };
+        case "memoryStatus":
+          // 只读快照：MEMORY.md / 各工作区 USER.md 的实际注入内容与字节数，
+          // 外加当前冻结了哪些会话。梦境页「记忆注入」子 Tab 的数据源。
+          return { ok: true, value: memoryStatus() };
         case "status":
           return { ok: true, value: { nextWindow: { start: engine.windowStart, end: engine.windowEnd }, workspace: engine.workspace } };
         default:
