@@ -381,7 +381,14 @@ npx esbuild client.js --loader:.js=jsx --outfile=/dev/null
 
 ## dsh 版本兼容性
 
-**要求 dsh ≥ 0.1.7-rc.1。**
+**要求 dsh ≥ 0.1.7-rc.1。** 当前实际运行在 **0.2.2-rc.3** 上（2026-11-20 核对）。
+
+> 三个 peer 依赖实测都满足声明范围：`@deepseek-ai/cordis` `^4.0.1` → 4.1.0 ·
+> `dsh-typert-protocol` `>=0.1.0-rc.6` → 0.2.2-rc.3 · `schemastery` `>=3.18.0` → 3.19.0。
+> 运行证据：记忆写入持续（`messages` 表最新时间戳即本轮对话），
+> `disabling profile plugin` 重启后零新增 —— `session/event` 钩子没被静默禁用。
+>
+> 下面三项 0.1.7 适配至今仍有效，0.2.x 没有再次改动这几个 API 面。
 
 三项 0.1.7 适配（2026-09-24）：
 
