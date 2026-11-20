@@ -175,6 +175,32 @@ FTS 查询抛异常时（索引损坏、MATCH 语法不可用），标记该表�
 - 5 分钟后自动重试，不需要人工介入
 - 降级后 `via` 报 `like-fts-stale`，能看出「这次结果是全扫来的」
 
+### 工具名与 tool_calls 也进索引
+
+`messages` 表有两列专门存工具信息，**它们不在正文里**，必须单独索引：
+
+| 列 | 存什么 | 谁写 |
+|---|---|---|
+| `tool_name` | `bash` / `read` / `memory_search` … | tool 行 |
+| `tool_calls` | `[{"id","name"}]` JSON | assistant 行 |
+
+**为什么要单独存**：`joinText()` 只取 `type === "text"` 的块，`tool-call` 块被丢掉 ——
+所以 assistant 行的正文里根本没有工具名。
+
+**tool 行的工具名怎么来**：`tool/result` 事件本身**不含工具名**，只有一个 `callId`
+（`message.toolCallId` 或 `message.source.callId`）。所以 `extractMessages()`
+会先扫**全量** log 建一张 `callId → 工具名` 的映射（来自 assistant 的 `tool-call` 块），
+再给每条 tool 行回填。
+
+⚠️ 映射必须扫全量、不能只看增量：增量提取时 tool/result 的 seq 大于 `sinceSeq`，
+但对应的 assistant tool-call 块 seq 更小 —— 只看增量会拿不到工具名。
+
+`messages_fts` 是三列索引（`content` + `tool_name` + `tool_calls`），LIKE 路由也是
+三列任一命中（`COALESCE(...,'')` 不能省 —— NULL LIKE 返回 NULL，取反时会静默变成不匹配）。
+
+**历史数据没有工具名**：老库迁移时新列全是 NULL，这是预期的 ——
+从迁移那一刻起新写入的消息才有。
+
 ### 排序、分页、上下文窗口
 
 | 参数 | 说明 |
