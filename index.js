@@ -375,7 +375,17 @@ export function apply(ctx, config) {
           throw new Error(`unknown endpoint: ${endpoint}`);
       }
     } catch (e) {
-      return { ok: false, error: { code: "ERR", message: e instanceof Error ? e.message : String(e) } };
+      // details 必填：客户端 parseConnectionResponse 要求 isRecord(error.details)，
+      // 缺了它整条错误会被替换成 "connection: invalid server-response failure"，
+      // 真实原因彻底看不见（2026-11-20 梦境页面就是这么被掩盖的）。
+      return {
+        ok: false,
+        error: {
+          code: "ERR",
+          message: e instanceof Error ? e.message : String(e),
+          details: { endpoint: String(endpoint) },
+        },
+      };
     }
   }, { authority: "trusted" });
   log.info("梦境数据 RPC 已注册（/dsh-dreaming）");
