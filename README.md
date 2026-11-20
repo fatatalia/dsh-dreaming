@@ -115,6 +115,110 @@ dsh-dreaming/
 
 ---
 
+## 检索：三路分流
+
+`memory_search` / `searchKnowledge` 按查询形态走三条不同的路（照
+`nousresearch/hermes-agent` 的 `persistence/sqlite/conversation/_store/search.py`）：
+
+| 查询形态 | 走哪 | 排序 |
+|---|---|---|
+| 不含 CJK | `messages_fts`（unicode61） | `bm25()` |
+| 含 CJK，且**每个 token** 都 ≥3 个 CJK 字 | `messages_fts_trigram` | `bm25()` |
+| 含 CJK，且有 token <3 个 CJK 字 | LIKE 全扫，**每 token 一子句、OR 连接** | `timestamp DESC` |
+
+`memory_search` 结果里的「检索方式」回报的是**实际走的路径**（`fts` / `fts-trigram` / `like`），
+不是按查询长度猜的。
+
+**为什么必须分流（实测数据）：**
+
+- `unicode61` 把连续 CJK 当成**一整个 token** ⇒ `记忆` 0 命中、`梦境` 0 命中
+- `trigram` 是 3 码点滑窗 ⇒ **必须 ≥3 个 CJK 字**。`梦`(1)→0、`梦境`(2)→0、`梦境记`(3)→1
+- ⇒ **两字中文词在两种 tokenizer 下都永远 0 命中**，只能靠 LIKE 兜底
+
+**为什么判断要逐 token 而不是看整串长度**：`广西 桂林` 总共 4 个 CJK 字看着够长，
+但每个 token 只有 2 字，trigram 仍然 0 命中。
+
+**MATCH 表达式构造**：逐 token 加双引号、空格连接（`梦境记忆 注入` → `"梦境记忆" "注入"`）。
+空格在 FTS5 里是隐式 AND。**整串包成一个 phrase 是错的** —— 那要求原文连续出现，
+多词查询必然 0 命中。
+
+### trigram 的 external-content 源是视图，不是 `messages` 表
+
+```sql
+CREATE VIEW messages_fts_trigram_src AS
+  SELECT id, content FROM messages
+  WHERE role <> 'tool' AND content IS NOT NULL;
+
+CREATE VIRTUAL TABLE messages_fts_trigram USING fts5(
+  content, content='messages_fts_trigram_src', content_rowid='id', tokenize='trigram'
+);
+```
+
+**这不是为了省空间，是为了索引合法性。** FTS5 的 external-content 表要求
+「源能精确读回索引里的内容」—— `'integrity-check'` 和 `'delete'` 都会回源表按 rowid
+取内容比对。若源是 `messages` 原表、而触发器排除了 tool 行，索引就比源少几万行，
+检查直接报 `database disk image is malformed`。
+
+（hermes 的 `FTS_STORAGE_VERSION` 走到 **3** 才修掉这个问题：v1/v2 都是「触发器过滤 + 源仍为原表」。
+抄它的 SQL 要连版本演进一起看。）
+
+**触发器三个分支的谓词必须与视图逐字一致**：
+
+```sql
+-- insert：只写非 tool 行
+INSERT INTO messages_fts_trigram(rowid, content)
+  SELECT new.id, new.content WHERE new.role <> 'tool' AND new.content IS NOT NULL;
+
+-- delete：也只删非 tool 行（tool 行根本不在索引里，无条件 delete 会破坏一致性）
+INSERT INTO messages_fts_trigram(messages_fts_trigram, rowid, content)
+  SELECT 'delete', old.id, old.content WHERE old.role <> 'tool' AND old.content IS NOT NULL;
+```
+
+把过滤放进视图之后，`'rebuild'` 命令才会**恢复可用**（它无视触发器、直接扫源，
+而源已经过滤过了）。
+
+`_migrateTrigramSrcView()` 的判据**不看 meta 标记**，而是直接查 `messages_fts_trigram`
+的实际 `sql` 里有没有 `messages_fts_trigram_src` —— 源不对就重建。这样手改过库、
+或从旧备份恢复，都能自动纠正。
+
+### tool 行为什么不进 trigram 索引
+
+- trigram 索引体积约为所覆盖文本的 **2.6 倍**，而 tool 输出占消息字节的 ~67%（本库实测）
+- 但**能力不丢**：tool 行完整存在 `messages` 表，仍可被 `messages_fts`（unicode61）搜到；
+  显式 `role: ["tool"]` 的查询由 `search()` 检测到 `wantsToolRows` 后强制走 LIKE，
+  能拿到完整内容
+
+---
+
+## 排查：SQLite / FTS5 的几个反直觉行为
+
+都是实测踩出来的，**验证一律写临时 node 脚本跑，别用 `sqlite3` CLI**。
+
+1. **`sqlite3` CLI 默认 `trusted_schema=OFF`，`node:sqlite` 默认 `=1`。**
+   同一套 DDL，CLI 里报 `unsafe use of virtual table "x"`（尤其触发器里写虚拟表），
+   插件里却跑得好好的。**CLI 验出来的「失败」十有八九是假警报。**
+
+2. **external-content 表的 `count(*)` 读的是底层 content 表**，不是索引行数。
+   要知道索引里到底有什么，用 `fts5vocab(<表>, 'instance')` 的 `doc` 集合：
+
+   ```sql
+   CREATE VIRTUAL TABLE _i USING fts5vocab(messages_fts_trigram, 'instance');
+   SELECT count(DISTINCT doc) FROM _i;
+   -- 注意：fts5vocab 建在 temp schema 里会报 no such fts5 table，必须建在主 schema
+   ```
+
+3. **`'integrity-check'` 才是索引健康的唯一判据**，`count(*)` 和 `MATCH` 都看不出来：
+
+   ```sql
+   INSERT INTO messages_fts_trigram(messages_fts_trigram, rank) VALUES('integrity-check', 1);
+   ```
+
+4. **判断触发器过滤是否生效，不能拿常见词去 MATCH** —— 该词在别的行里也有
+   （本库用「工具输出」测出 1807 条假阳性，实际都是 assistant 消息）。
+   要数 `fts5vocab` 的 doc 集合里目标角色的占比。
+
+---
+
 ## Web 界面
 
 **左侧菜单「梦境记忆」→ 独立页面**（`main` + `sidebar.panellist` 双注册，同一个 id `dreaming`）。页内三个子 Tab：
