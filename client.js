@@ -416,7 +416,7 @@ window.__ModuleLoader__.load({
       const hint = { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 };
       const groupTitle = { margin: "18px 0 8px", fontWeight: 600, fontSize: 13, color: "var(--dsw-alias-label-secondary)" };
       return S.jsxs("div", { style: { maxWidth: 640, fontFamily: "inherit", fontSize: 14, lineHeight: 1.6 }, children: [
-        S.jsx("p", { style: { color: "var(--dsw-alias-label-secondary)", margin: "0 0 12px" }, children: "梦境在每天凌晨随机窗口内运行一次，并从全部工作区取材。窗口为本地时间 HH:mm。" }),
+        S.jsx("p", { style: { color: "var(--dsw-alias-label-secondary)", margin: "0 0 12px" }, children: "本插件管两件事：① 梦境——每天凌晨随机窗口内运行一次，从全部工作区取材，生成梦境日记，并把高价值洞察晋升进 MEMORY.md；② 对话沉淀——对话进行中每隔若干轮，把值得记的内容抄进当天的 memory/daily 草稿，夜间再由梦境提炼成长期记忆。时间均为本地时间 HH:mm。" }),
         S.jsxs("div", { style: { display: "flex", gap: 10 }, children: [
           S.jsxs("div", { style: { ...row, flex: 1 }, children: [
             S.jsx("label", { style: labelStyle, children: "窗口开始" }),
@@ -488,7 +488,7 @@ window.__ModuleLoader__.load({
             S.jsx("span", { style: hint, children: "每晚从 daily 提炼到 MEMORY.md / USER.md" }),
           ] }),
         ] }),
-        S.jsx("div", { style: groupTitle, children: "nudge（对话中途沉淀）" }),
+        S.jsx("div", { style: groupTitle, children: "对话沉淀" }),
         S.jsxs("div", { style: row, children: [
           S.jsx("label", { style: labelStyle, children: "启用" }),
           S.jsxs("label", { style: { display: "flex", alignItems: "center", gap: 6, cursor: writable ? "pointer" : "default" }, children: [
