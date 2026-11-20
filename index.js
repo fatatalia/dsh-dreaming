@@ -2,7 +2,7 @@
  * dsh-dreaming — host 半部分
  *
  * 梦境记忆整合：每天凌晨随机窗口触发 Deep 闭环 —— 引擎从**本地取材**
- * （每日记忆 memory/daily/*.md + 记忆库 ~/.dsh/fatatalia-memory.db 的近期对话）、
+ * （各工作区 memory/daily/*.md + 记忆库 ~/.dsh/dreaming-memory.db 的近期对话）、
  * 生成叙事化梦境日记（法塔人格）、自主判定高价值洞察；梦境存 SQLite、晋升写回
  * MEMORY.md。web 端经 connection.rpc 读取梦境数据（"/dsh-dreaming" 通道）在
  * "梦境" Tab 展示；设置页（Settings → 梦境）经 Typert remote 配置默认工作区与
@@ -14,12 +14,17 @@ import { defineTool } from "@deepseek-ai/dsh-tools";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { DreamEngine } from "./lib/dream-engine.mjs";
+import { applyMemory } from "./lib/memory.mjs";
+import { applyPromptInjection } from "./lib/inject.mjs";
+import { DEFAULT_DB_PATH } from "./lib/db.mjs";
 import { DreamStore } from "./lib/store.mjs";
 import { renderDreams } from "./lib/dream-render.mjs";
 
 export const name = "dsh-dreaming";
 
-export const inject = ["typert", "llm", "agents", "agentDefaultModel", "agentPresets", "sessions", "workspaceRegistry", "connection", "tools", "webServer"];
+// 2026-11-20：并入记忆功能后补 sessionPersistence（原 fatatalia-memory 的 inject 里就有，
+// 落库走 session/event，缺它会在 apply 时抛依赖缺失）。
+export const inject = ["typert", "llm", "agents", "agentDefaultModel", "agentPresets", "sessions", "sessionPersistence", "workspaceRegistry", "connection", "tools", "webServer", "systemPrompt"];
 
 // 2026-09-24 适配 dsh 0.1.7：ctx.settings.register() 已移除，原 `dreaming`
 // settings namespace 并入插件 Config；.volatile() 字段可在设置页热改。
@@ -39,6 +44,21 @@ export const Config = z.object({
   reasoningEffort: z.string().default("high").volatile(),
   /** turn 级单步超时（秒）：step 超过该时长被 dsh-turn-guard 强制 cancel；不配/0 = 不限制。 */
   stepTimeoutSec: z.number().volatile(),
+
+  // ── 以下 5 项 2026-11-20 从 dsh-fatatalia-memory 并入 ──────────────────
+  // 两插件已合并：dreaming 管梦，memory 管落库与检索，同一个库、同一个进程。
+  /** SQLite 库路径（对话 + 梦境共用）。 */
+  dbPath: z.string().default(DEFAULT_DB_PATH),
+  /** 对话落库总开关。梦境开关另见 dreamingEnabled。 */
+  memoryEnabled: z.boolean().default(true),
+  /** 是否把 assistant 的 reasoning 也入库（体积大，默认关）。 */
+  storeReasoning: z.boolean().default(false),
+  /** 单个 turn 最多入库多少条（防御性上限，超出部分下轮续）。 */
+  maxPerTurn: z.number().default(2000),
+  /** 落库与检索的日志详细程度。 */
+  memoryVerbose: z.boolean().default(true),
+  /** 提炼（梦境）总开关 —— 与对话落库独立，关掉梦境不影响检索。 */
+  dreamingEnabled: z.boolean().default(true),
 });
 
 // ── Typert wire schemas（宽松 parse，同 imessage 插件） ──────────────────────
@@ -193,8 +213,34 @@ export function apply(ctx, config) {
     error: (m) => { console.error(`[dr:err] ${m}`); try { Logger?.error?.(m); } catch {} },
   };
 
+  // ── 记忆落库与检索（2026-11-20 从 dsh-fatatalia-memory 并入）──────────
+  // 独立于梦境：memoryEnabled 关掉只停落库，梦境照跑；dreamingEnabled 反之。
+  // 用 try/catch 包住 —— 记忆是辅助功能，坏掉不能拖垮梦境调度。
+  const memCfg = {
+    dbPath: config?.dbPath ?? DEFAULT_DB_PATH,
+    enabled: config?.memoryEnabled !== false,
+    storeReasoning: config?.storeReasoning === true,
+    maxPerTurn: Number(config?.maxPerTurn) > 0 ? Number(config.maxPerTurn) : 2000,
+    verbose: config?.memoryVerbose !== false,
+  };
+  const memLog = memCfg.verbose ? log : { info: () => {}, warn: log.warn, error: log.error };
+  try {
+    applyMemory(ctx, memCfg, memLog);
+  } catch (e) {
+    log.error(`记忆模块加载失败（不影响梦境）：${e instanceof Error ? e.message : e}`);
+  }
+
+  // ── 记忆注入层（P3）：把 MEMORY.md / USER.md 送进 system prompt ────────
+  // 与落库独立：注入失败只影响「我记不记得」，不影响「我记不记」。
+  try {
+    applyPromptInjection(ctx, log);
+  } catch (e) {
+    log.error(`记忆注入层加载失败（不影响落库与梦境）：${e instanceof Error ? e.message : e}`);
+  }
+
   // 0.1.7：配置即插件 Config 的 volatile 字段，这里适配出等价的 scope 外壳。
-  // （默认工作区 = 当前用户 dsh/mayacode，窗口 02:00-04:30。）
+  // （2026-11-20：workspace 语义已变 —— 不再是「素材来源」，而是梦境 session 的 cwd 兜底；
+  //   素材来源改为从记忆库 sessions.workspace 动态取全部工作区。窗口 02:00-04:30。）
   const scope = {
     get: () => ({
       workspace: config.workspace.get(),
