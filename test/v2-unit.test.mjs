@@ -168,6 +168,7 @@ function rmSyncRec(p) { try { rmSync(p, { force: true, recursive: true }); } cat
   }
   await writeFile(memoryPath, big, "utf8");
   const before = Buffer.byteLength(big, "utf8");
+  engine.budgetBytes = 131072; // 默认已是 10KB；这组数据按 128KB 设计
   ok("预算：测试文件超过 budgetBytes（128KB）", before > engine.budgetBytes, `${before} bytes`);
   await engine.compactMemoryForBudget();
   const after = await readFile(memoryPath, "utf8");
@@ -214,6 +215,9 @@ const mergeFake = {
   budgetBytes: 131072,
   log: { info: () => {}, warn: () => {} },
   compactMemoryForBudget: async () => {},
+  // appendPromotionsToMemory 里会调 this.fileStamp() 做乐观并发检查；
+  // 假对象缺这个方法会抛错、被 catch 吞掉，表现为「什么都没写」。
+  fileStamp: async () => "test",
 };
 const mergeProto = DreamEngine.prototype;
 const MERGE_H = "## 2026-10-27 — 梦境沉淀（dsh-dreaming）";

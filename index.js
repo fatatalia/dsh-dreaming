@@ -32,7 +32,10 @@ export const inject = ["typert", "llm", "agents", "agentDefaultModel", "agentPre
 /** `dreaming` 配置：默认工作区 + 随机窗口。 */
 export const Config = z.object({
   /** 默认工作区（梦境产物落盘位置）。 */
-  workspace: z.string().default(join(homedir(), "dsh", "mayacode")).volatile(),
+  workspace: z.string().default(homedir()).volatile(),
+  // ↑ 默认值只是兜底（梦境 session 的 cwd）。真实工作区由 profile 的
+  //    config.workspace 显式指定；漏配时会落到家目录，不至于启动失败。
+  //    2026-11-20 之前这里硬编码成 ~/dsh/mayacode —— 对别人的 profile 是无意义的路径。
   windowStart: z.string().default("02:00").volatile(),
   windowEnd: z.string().default("04:30").volatile(),
   provider: z.string().volatile(),
