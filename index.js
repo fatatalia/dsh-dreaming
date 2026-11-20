@@ -246,13 +246,29 @@ export function apply(ctx, config) {
   // 独立于梦境：memoryEnabled 关掉只停落库，梦境照跑；dreamingEnabled 反之。
   // 用 try/catch 包住 —— 记忆是辅助功能，坏掉不能拖垮梦境调度。
   const memCfg = {
-    dbPath: config?.dbPath ?? DEFAULT_DB_PATH,
-    enabled: config?.memoryEnabled !== false,
-    storeReasoning: config?.storeReasoning === true,
-    maxPerTurn: Number(config?.maxPerTurn) > 0 ? Number(config.maxPerTurn) : 2000,
-    verbose: config?.memoryVerbose !== false,
+    // 这些字段都是 .volatile() 的：volatile 字段访问到的是 Value 包装器，
+    // 必须 .get() 取真值；直接拿包装器传给 path 函数就是
+    // "p.startsWith is not a function"。
+    dbPath: config?.dbPath?.get?.() ?? DEFAULT_DB_PATH,
+    enabled: config?.memoryEnabled?.get?.() !== false,
+    // 运行时开关（applyMemory 每次 turn/end 现读），热改立即生效。
+    isEnabled: () => config?.memoryEnabled?.get?.() !== false,
+    getStoreReasoning: () => config?.storeReasoning?.get?.() === true,
+    getMaxPerTurn: () => {
+      const n = Number(config?.maxPerTurn?.get?.());
+      return n > 0 ? n : 2000;
+    },
+    isVerbose: () => config?.memoryVerbose?.get?.() !== false,
+    storeReasoning: config?.storeReasoning?.get?.() === true,
+    maxPerTurn: Number(config?.maxPerTurn?.get?.()) > 0 ? Number(config.maxPerTurn.get()) : 2000,
+    verbose: config?.memoryVerbose?.get?.() !== false,
   };
-  const memLog = memCfg.verbose ? log : { info: () => {}, warn: log.warn, error: log.error };
+  // 日志开关也做成活的：设置页关掉立刻安静，不用重启。
+  const memLog = {
+    info: (...args) => { if (memCfg.isVerbose()) log.info(...args); },
+    warn: (...args) => log.warn(...args),
+    error: (...args) => log.error(...args),
+  };
   try {
     applyMemory(ctx, memCfg, memLog);
   } catch (e) {
@@ -422,7 +438,25 @@ export function apply(ctx, config) {
   log.info("梦境数据 RPC 已注册（/dsh-dreaming）");
 
   // 排程首次梦境（启动后自动计算凌晨窗口内随机时刻）。
-  engine.scheduleNext();
+  // dreamingEnabled 之前只有 Config 定义、没有消费方 —— 设置页那个开关是假的。
+  const dreamOn = () => config?.dreamingEnabled?.get?.() !== false;
+  if (dreamOn()) {
+    engine.scheduleNext();
+  } else {
+    log.info("dreaming: 已关闭（dreamingEnabled=false），不排程");
+  }
+  ctx.on("loader/volatile-update", () => {
+    try {
+      if (dreamOn()) {
+        if (engine._timer === null) { engine.scheduleNext(); log.info("dreaming: 已恢复排程"); }
+      } else if (engine._timer !== null) {
+        engine.pauseSchedule();
+        log.info("dreaming: 已暂停排程");
+      }
+    } catch (e) {
+      log.warn(`dreaming: 排程热更新失败 ${e instanceof Error ? e.message : e}`);
+    }
+  });
 
   ctx.on("dispose", () => {
     engine.dispose();
