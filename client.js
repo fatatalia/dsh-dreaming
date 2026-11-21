@@ -40,6 +40,10 @@ window.__ModuleLoader__.load({
         listDreams: (opts) => call("listDreams", opts || {}),
         listPromotions: () => call("listPromotions", {}),
         memoryStatus: () => call("memoryStatus", {}),
+        vectorStatus: () => call("vectorStatus", {}),
+        vectorPause: () => call("vectorPause", {}),
+        vectorResume: () => call("vectorResume", {}),
+        downloadModel: () => call("downloadModel", {}),
         runNow: () => call("runNow", {}),
       };
     }
@@ -95,22 +99,67 @@ window.__ModuleLoader__.load({
 
     const fmtB = (n) => (typeof n === "number" && n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n || 0} B`);
 
+    /**
+     * 细长进度条。放在模块级（不是一个组件内部）—— MemoryPanel 和
+     * DreamSettings 都要用；只定义在 MemoryPanel 里的话，设置页引用它会
+     * ReferenceError，表现为「设置页整个不渲染」（2026-11-21 踩的）。
+     */
+    const bar = (pct, danger) => S.jsx("div", {
+      style: { height: 6, borderRadius: 3, background: "var(--dsw-alias-bg-l2, #e8e8e8)", overflow: "hidden", marginTop: 6 },
+      children: S.jsx("div", {
+        style: {
+          width: `${Math.min(100, Math.max(0, pct))}%`,
+          height: "100%",
+          background: danger
+            ? "var(--dsw-alias-state-error-primary, #d33)"
+            : "var(--dsw-alias-state-success-primary, #4caf50)",
+        },
+      }),
+    });
+
     /** 「记忆注入」子 Tab：只读快照，显示 system prompt 里实际注入了什么。 */
-    function MemoryPanel({ data }) {
+    function MemoryPanel({ data, runtime }) {
+      /*
+       * ⚠️ hooks 必须放在下面的 early return 之前 —— React 规定每次渲染的
+       * hooks 顺序必须一致，把 useState/useEffect 写在 return 后面会直接报
+       * "Rendered more hooks than during the previous render"。
+       */
+      const [vec, setVec] = React.useState(null);
+      const [vecBusy, setVecBusy] = React.useState(false);
+      // 手动触发重跑（暂停/继续之后要重新开轮询，光靠 phase 变化不可靠）
+      const [vecTick, setVecTick] = React.useState(0);
+
+      React.useEffect(() => {
+        let current = true;
+        let timer = null;
+        const poll = () => {
+          Promise.resolve().then(() => runtime.vectorStatus()).then((st) => {
+            if (!current) return;
+            setVec(st || null);
+            // 还有活干就继续盯；idle / paused 停下来别再空转
+            const active = st && st.enabled && st.pending > 0 && st.phase !== "paused";
+            if (active) timer = setTimeout(poll, 3000);
+          }).catch(() => { if (current) setVec(null); });
+        };
+        poll();
+        return () => { current = false; if (timer) clearTimeout(timer); };
+      }, [runtime, vecTick]);
+
+      const toggleVec = () => {
+        if (!vec || vecBusy) return;
+        setVecBusy(true);
+        const action = vec.phase === "paused" ? runtime.vectorResume : runtime.vectorPause;
+        Promise.resolve().then(action)
+          .then(() => runtime.vectorStatus())
+          .then((st) => { setVec(st || null); setVecTick((t) => t + 1); })
+          .catch(() => {})
+          .finally(() => setVecBusy(false));
+      };
+
       if (data === null) return S.jsx("p", { style: empty, children: "加载中…" });
       const m = data;
       const budget = m.budgetBytes || 10240;
       const errColor = "var(--dsw-alias-state-error-primary, #d33)";
-      const bar = (pct, danger) => S.jsx("div", {
-        style: { height: 6, borderRadius: 3, background: "var(--dsw-alias-bg-l2, #e8e8e8)", overflow: "hidden", marginTop: 6 },
-        children: S.jsx("div", {
-          style: {
-            width: `${Math.min(100, Math.max(0, pct))}%`,
-            height: "100%",
-            background: danger ? errColor : "var(--dsw-alias-state-success-primary, #4caf50)",
-          },
-        }),
-      });
       return S.jsxs("div", { children: [
         S.jsxs("div", { style: card, children: [
           S.jsx("div", { style: title, children: "MEMORY.md —— 公共环境事实" }),
@@ -134,15 +183,42 @@ window.__ModuleLoader__.load({
               w.truncated ? S.jsx("div", { style: { fontSize: 12, color: errColor, marginTop: 4 }, children: "超预算，正在截断注入" }) : null,
             ] })),
         ]}),
-        S.jsxs("div", { style: card, children: [
-          S.jsxs("div", { style: title, children: [`冻结中的会话 ${(m.cacheEntries || []).length} / ${m.maxCacheEntries || 0}`] }),
-          S.jsx("div", { style: { ...meta, marginBottom: 4 }, children: "同一会话只读一次盘；压缩结束后作废，下一轮重新读取" }),
-          (m.cacheEntries || []).length === 0 ? S.jsx("div", { style: empty, children: "暂无" }) :
-            m.cacheEntries.map((e) => S.jsxs("div", {
-              style: { fontSize: 12, color: "var(--dsw-alias-label-secondary)", marginTop: 4, wordBreak: "break-all" },
-              children: [S.jsx("code", { children: e.sessionId }), ` · ${fmtB(e.bytes)} · ${e.cwd || "（无 cwd）"}`],
-            })),
-        ]}),
+        vec ? S.jsxs("div", { style: card, children: [
+          S.jsx("div", { style: title, children: "语义索引" }),
+          vec.enabled === false
+            ? S.jsx("div", { style: meta, children: "未启用。到「设置 → 梦境记忆 → 语义检索」打开。" })
+            : S.jsxs("div", { children: [
+              S.jsxs("div", { style: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, fontSize: 13 }, children: [
+                S.jsx("span", {
+                  style: { fontWeight: 500 },
+                  children: ({
+                    warming: "① 建立近期索引",
+                    building: "② 补齐历史索引",
+                    updating: "追平新消息",
+                    idle: "✓ 索引已是最新",
+                    paused: "已暂停",
+                  })[vec.phase] || vec.phase,
+                }),
+                vec.phase !== "idle" ? S.jsx("button", {
+                  type: "button",
+                  disabled: vecBusy,
+                  onClick: toggleVec,
+                  style: { padding: "2px 10px", fontSize: 12, cursor: vecBusy ? "default" : "pointer" },
+                  children: vec.phase === "paused" ? "继续" : "暂停",
+                }) : null,
+              ] }),
+              bar(Number(vec.total) > 0 ? (Number(vec.indexed) / Number(vec.total)) * 100 : 0, false),
+              S.jsxs("div", {
+                style: { fontSize: 12, color: "var(--dsw-alias-label-secondary)", marginTop: 6, display: "flex", flexWrap: "wrap", gap: 10 },
+                children: [
+                  S.jsx("span", { children: `已索引 ${Number(vec.indexed || 0).toLocaleString()} / ${Number(vec.total || 0).toLocaleString()}` }),
+                  vec.pending > 0 ? S.jsx("span", { children: `待补 ${Number(vec.pending).toLocaleString()}` }) : null,
+                  vec.etaMinutes ? S.jsx("span", { children: `预计还需 ${vec.etaMinutes} 分钟` }) : null,
+                  vec.avgMsPerItem ? S.jsx("span", { children: `约 ${vec.avgMsPerItem} ms/条` }) : null,
+                ],
+              }),
+            ] }),
+        ]}) : null,
         S.jsxs("details", { style: card, children: [
           S.jsx("summary", { style: { ...title, cursor: "pointer", marginBottom: 0 }, children: "展开 MEMORY.md 正文" }),
           S.jsx("pre", { style: { ...body, fontSize: 12, marginTop: 10, marginBottom: 0 }, children: m.memoryText || "（空）" }),
@@ -266,7 +342,7 @@ window.__ModuleLoader__.load({
                   S.jsx("div", { style: meta, children: `${p.dream_date || "—"} · ${p.target}` }),
                   S.jsx("div", { style: body, children: p.content }),
                 ] })),
-              ]}) : S.jsx(MemoryPanel, { data: memory }),
+              ]}) : S.jsx(MemoryPanel, { data: memory, runtime }),
               ],
             }),
           }),
@@ -326,8 +402,48 @@ window.__ModuleLoader__.load({
     const inputStyle = { flex: 1, padding: "5px 8px", borderRadius: 6, border: "1px solid var(--dsw-alias-divider, #ddd)", background: "var(--dsw-alias-bg-base)", color: "var(--dsw-alias-label-primary)", fontFamily: "inherit" };
 
     /** Settings → 梦境记忆：默认工作区 + 随机窗口。 */
+    /**
+     * 设置页区块的错误边界。
+     *
+     * 为什么需要它：Settings 渲染时如果某个 section 组件抛异常，React 会把
+     * **整个区块**卸载掉，页面上什么都不显示、控制台也未必看得见 ——
+     * 排查时完全抓瞎（2026-11-21 就是这样白了两轮）。
+     * 有了它，异常会以文本形式直接印在设置页上，一眼能看到出错行。
+     */
+    class SectionBoundary extends React.Component {
+      constructor(props) {
+        super(props);
+        this.state = { err: null };
+      }
+      static getDerivedStateFromError(err) {
+        return { err };
+      }
+      render() {
+        if (this.state.err) {
+          const e = this.state.err;
+          return S.jsx("pre", {
+            style: {
+              margin: 0,
+              padding: 10,
+              fontSize: 11,
+              lineHeight: 1.5,
+              color: "var(--dsw-alias-state-error-primary, #d33)",
+              background: "var(--dsw-alias-bg-l2, #f6f6f6)",
+              borderRadius: 6,
+              whiteSpace: "pre-wrap",
+              wordBreak: "break-all",
+              maxHeight: 320,
+              overflow: "auto",
+            },
+            children: `梦境记忆设置渲染失败：\n${String(e?.stack || e)}`,
+          });
+        }
+        return this.props.children;
+      }
+    }
+
     function DreamSettings(props) {
-      const { getConfig, setConfig, listProviders, listModels } = props;
+      const { getConfig, setConfig, listProviders, listModels, runtime } = props;
       const [state, setState] = React.useState({ status: "loading", writable: true });
       const [memoryEnabled, setMemoryEnabled] = React.useState(true);
       const [storeReasoning, setStoreReasoning] = React.useState(false);
@@ -337,6 +453,17 @@ window.__ModuleLoader__.load({
       const [nudgeEnabled, setNudgeEnabled] = React.useState(true);
       const [nudgeTurnThreshold, setNudgeTurnThreshold] = React.useState(10);
       const [nudgeMinGapMin, setNudgeMinGapMin] = React.useState(5);
+      const [semanticEnabled, setSemanticEnabled] = React.useState(false);
+      const [semanticAutoInject, setSemanticAutoInject] = React.useState(true);
+      const [semanticIntervalMin, setSemanticIntervalMin] = React.useState(10);
+      const [semanticMinScore, setSemanticMinScore] = React.useState(0.62);
+      const [semanticTopK, setSemanticTopK] = React.useState(6);
+      const [semanticVectorWeight, setSemanticVectorWeight] = React.useState(0.7);
+      const [semanticMaxSnippetChars, setSemanticMaxSnippetChars] = React.useState(200);
+      const [semanticAutoDownload, setSemanticAutoDownload] = React.useState(true);
+      // 模型运行状态（只读，来自 vectorStatus）—— 与配置项无关，不参与保存。
+      const [vecModel, setVecModel] = React.useState(null);
+      const [modelBusy, setModelBusy] = React.useState(false);
       const [provider, setProvider] = React.useState("");
       const [windowStart, setWindowStart] = React.useState("02:00");
       const [windowEnd, setWindowEnd] = React.useState("04:30");
@@ -360,6 +487,14 @@ window.__ModuleLoader__.load({
           setNudgeEnabled(cfg?.nudgeEnabled !== false);
           if (typeof cfg?.nudgeTurnThreshold === "number") setNudgeTurnThreshold(cfg.nudgeTurnThreshold);
           if (typeof cfg?.nudgeMinGapMin === "number") setNudgeMinGapMin(cfg.nudgeMinGapMin);
+          setSemanticEnabled(cfg?.semanticEnabled === true);
+          setSemanticAutoInject(cfg?.semanticAutoInject !== false);
+          if (typeof cfg?.semanticIntervalMin === "number") setSemanticIntervalMin(cfg.semanticIntervalMin);
+          if (typeof cfg?.semanticMinScore === "number") setSemanticMinScore(cfg.semanticMinScore);
+          if (typeof cfg?.semanticTopK === "number") setSemanticTopK(cfg.semanticTopK);
+          if (typeof cfg?.semanticVectorWeight === "number") setSemanticVectorWeight(cfg.semanticVectorWeight);
+          if (typeof cfg?.semanticMaxSnippetChars === "number") setSemanticMaxSnippetChars(cfg.semanticMaxSnippetChars);
+          setSemanticAutoDownload(cfg?.semanticAutoDownload !== false);
           setWindowStart(typeof cfg?.windowStart === "string" ? cfg.windowStart : "02:00");
           setWindowEnd(typeof cfg?.windowEnd === "string" ? cfg.windowEnd : "04:30");
           setProvider(typeof cfg?.provider === "string" ? cfg.provider : "");
@@ -370,6 +505,28 @@ window.__ModuleLoader__.load({
         }, () => { if (current) setState({ status: "error", writable: true }); });
         return () => { current = false; };
       }, [getConfig, loadTick]);
+
+      /*
+       * 模型运行状态轮询。
+       *
+       * 只在「正在下载」时密集轮询（1 秒）—— 313MB 要下几分钟，
+       * 用 3 秒间隔百分比会一顿一顿地跳，看着像卡住。
+       * 其他状态（ready / missing / failed）是静态的，拉一次就够，
+       * 不轮询也不占 RPC。
+       */
+      React.useEffect(() => {
+        let current = true;
+        let timer = null;
+        const pull = () => {
+          Promise.resolve().then(() => runtime?.vectorStatus?.()).then((st) => {
+            if (!current || !st) return;
+            setVecModel(st.model || null);
+            if (st.model?.state === "loading") timer = setTimeout(pull, 1000);
+          }).catch(() => { if (current) setVecModel(null); });
+        };
+        pull();
+        return () => { current = false; if (timer) clearTimeout(timer); };
+      }, [runtime, loadTick]);
 
       // 加载可用 provider 目录；provider 变化时加载其模型列表。
       React.useEffect(() => {
@@ -401,6 +558,8 @@ window.__ModuleLoader__.load({
           provider, model, reasoningEffort, windowStart, windowEnd, stepTimeoutSec,
           memoryEnabled, storeReasoning, maxPerTurn, memoryVerbose, dreamingEnabled,
           nudgeEnabled, nudgeTurnThreshold, nudgeMinGapMin,
+          semanticEnabled, semanticAutoInject, semanticIntervalMin, semanticMinScore,
+          semanticTopK, semanticVectorWeight, semanticMaxSnippetChars,
         }))
           .then(() => { setSaved(true); setTimeout(() => setSaved(false), 1500); })
           .catch((e) => console.error("dsh-dreaming save failed", e));
@@ -415,6 +574,28 @@ window.__ModuleLoader__.load({
       const writable = state.writable;
       const hint = { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 };
       const groupTitle = { margin: "18px 0 8px", fontWeight: 600, fontSize: 13, color: "var(--dsw-alias-label-secondary)" };
+      /*
+       * 可折叠分组。用原生 <details>/<summary> —— 不用自己管展开状态，
+       * 键盘和读屏都能用，也不需要额外 state。
+       */
+      const groupBox = {
+        margin: "10px 0",
+        border: "1px solid var(--dsw-alias-border-l2)",
+        borderRadius: 8,
+        // 左右留出内边距给内容；summary 用负 margin 顶回去，让标题背景铺满整行
+        padding: "0 12px 4px",
+      };
+      const groupSummary = {
+        margin: "0 -12px 8px",
+        padding: "10px 12px",
+        fontWeight: 600,
+        fontSize: 13,
+        color: "var(--dsw-alias-label-secondary)",
+        cursor: "pointer",
+        background: "var(--dsw-alias-bg-l1, #fafafa)",
+        userSelect: "none",
+        // 不设 listStyle: none —— 那会把原生三角一起藏掉，用户就看不出能展开
+      };
       return S.jsxs("div", { style: { maxWidth: 640, fontFamily: "inherit", fontSize: 14, lineHeight: 1.6 }, children: [
         S.jsx("p", { style: { color: "var(--dsw-alias-label-secondary)", margin: "0 0 12px" }, children: "本插件管两件事：① 梦境——每天凌晨随机窗口内运行一次，从全部工作区取材，生成梦境日记，并把高价值洞察晋升进 MEMORY.md；② 对话沉淀——对话进行中每隔若干轮，把值得记的内容抄进当天的 memory/daily 草稿，夜间再由梦境提炼成长期记忆。时间均为本地时间 HH:mm。" }),
         S.jsxs("div", { style: { display: "flex", gap: 10 }, children: [
@@ -454,61 +635,168 @@ window.__ModuleLoader__.load({
           S.jsx("input", { type: "number", min: 0, step: 1, value: stepTimeoutSec, disabled: !writable, onChange: (e) => setStepTimeoutSec(Number(e.target.value) || 0), style: { ...inputStyle, maxWidth: 160 }, placeholder: "0 = 不限制" }),
           S.jsx("span", { style: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12 }, children: "秒，单步（一次模型请求）超过该时长强制中断，0 = 不限制" }),
         ] }),
-        S.jsx("div", { style: groupTitle, children: "记忆" }),
-        S.jsxs("div", { style: row, children: [
-          S.jsx("label", { style: labelStyle, children: "对话落库" }),
-          S.jsxs("label", { style: { display: "flex", alignItems: "center", gap: 6, cursor: writable ? "pointer" : "default" }, children: [
-            S.jsx("input", { type: "checkbox", checked: memoryEnabled, disabled: !writable, onChange: (e) => setMemoryEnabled(e.target.checked) }),
-            S.jsx("span", { style: hint, children: "把每轮对话存进本地库，供检索" }),
+        S.jsxs("details", { style: groupBox, children: [
+          S.jsx("summary", { style: groupSummary, children: "记忆" }),
+          S.jsxs("div", { style: row, children: [
+            S.jsx("label", { style: labelStyle, children: "对话落库" }),
+            S.jsxs("label", { style: { display: "flex", alignItems: "center", gap: 6, cursor: writable ? "pointer" : "default" }, children: [
+              S.jsx("input", { type: "checkbox", checked: memoryEnabled, disabled: !writable, onChange: (e) => setMemoryEnabled(e.target.checked) }),
+              S.jsx("span", { style: hint, children: "把每轮对话存进本地库，供检索" }),
+            ] }),
+          ] }),
+          S.jsxs("div", { style: row, children: [
+            S.jsx("label", { style: labelStyle, children: "记录思考过程" }),
+            S.jsxs("label", { style: { display: "flex", alignItems: "center", gap: 6, cursor: writable ? "pointer" : "default" }, children: [
+              S.jsx("input", { type: "checkbox", checked: storeReasoning, disabled: !writable, onChange: (e) => setStoreReasoning(e.target.checked) }),
+              S.jsx("span", { style: hint, children: "体积大，默认关" }),
+            ] }),
+          ] }),
+          S.jsxs("div", { style: row, children: [
+            S.jsx("label", { style: labelStyle, children: "单轮上限" }),
+            S.jsx("input", { type: "number", min: 1, step: 100, value: maxPerTurn, disabled: !writable, onChange: (e) => setMaxPerTurn(Number(e.target.value) || 2000), style: { ...inputStyle, maxWidth: 160 } }),
+            S.jsx("span", { style: hint, children: "条，单轮最多入库多少条" }),
+          ] }),
+          S.jsxs("div", { style: row, children: [
+            S.jsx("label", { style: labelStyle, children: "落库日志" }),
+            S.jsxs("label", { style: { display: "flex", alignItems: "center", gap: 6, cursor: writable ? "pointer" : "default" }, children: [
+              S.jsx("input", { type: "checkbox", checked: memoryVerbose, disabled: !writable, onChange: (e) => setMemoryVerbose(e.target.checked) }),
+              S.jsx("span", { style: hint, children: "关掉只保留错误日志" }),
+            ] }),
+          ] }),
+          S.jsxs("div", { style: row, children: [
+            S.jsx("label", { style: labelStyle, children: "梦境提炼" }),
+            S.jsxs("label", { style: { display: "flex", alignItems: "center", gap: 6, cursor: writable ? "pointer" : "default" }, children: [
+              S.jsx("input", { type: "checkbox", checked: dreamingEnabled, disabled: !writable, onChange: (e) => setDreamingEnabled(e.target.checked) }),
+              S.jsx("span", { style: hint, children: "每晚从 daily 提炼到 MEMORY.md / USER.md" }),
+            ] }),
           ] }),
         ] }),
-        S.jsxs("div", { style: row, children: [
-          S.jsx("label", { style: labelStyle, children: "记录思考过程" }),
-          S.jsxs("label", { style: { display: "flex", alignItems: "center", gap: 6, cursor: writable ? "pointer" : "default" }, children: [
-            S.jsx("input", { type: "checkbox", checked: storeReasoning, disabled: !writable, onChange: (e) => setStoreReasoning(e.target.checked) }),
-            S.jsx("span", { style: hint, children: "体积大，默认关" }),
+        S.jsxs("details", { style: groupBox, children: [
+          S.jsx("summary", { style: groupSummary, children: "语义检索" }),
+          S.jsxs("div", { style: row, children: [
+            S.jsx("label", { style: labelStyle, children: "启用" }),
+            S.jsxs("label", { style: { display: "flex", alignItems: "center", gap: 6, cursor: writable ? "pointer" : "default" }, children: [
+              S.jsx("input", {
+                type: "checkbox", checked: semanticEnabled, disabled: !writable,
+                onChange: (e) => {
+                  const on = e.target.checked;
+                  // 打开要先确认：首次开启会启动嵌入子进程并开始建立索引，
+                  // 这一步在 2 核机器上要占不少时间，不该一次误点就悄悄开始。
+                  if (on && !window.confirm("开启后会立即开始为历史对话建立向量索引，\n期间会持续占用一个 CPU 核心（可随时暂停）。\n\n现在开启吗？")) return;
+                  setSemanticEnabled(on);
+                },
+              }),
+              S.jsx("span", { style: hint, children: "向量语义检索；关闭时行为与现在完全一致" }),
+            ] }),
           ] }),
+          /*
+           * 嵌入模型状态（2026-11-21）。
+           * 放在启用开关之后、子配置之前 —— 开关关着也要能看到模型有没有。
+           * 这是只读状态，不参与保存。
+           */
+          (() => {
+            const mdl = vecModel;
+            if (!mdl) return null;
+            const st = mdl.state || "missing";
+            const tone = st === "ready"
+              ? "var(--dsw-alias-state-success-primary, #4caf50)"
+              : st === "failed" ? "var(--dsw-alias-state-error-primary, #d33)" : "var(--dsw-alias-label-secondary)";
+            const text = st === "ready"
+              ? `✓ 已就绪 · ${mdl.displaySize || fmtB(mdl.bytes || 0)}`
+              : st === "loading"
+                ? `下载中 ${mdl.percent || 0}% · ${mdl.speedBps ? (mdl.speedBps / 1048576).toFixed(1) : "0"} MB/s`
+                : st === "failed"
+                  ? `不可用：${mdl.error || "未知原因"}`
+                  : `未检测到 · 需要 313MB`;
+            const canDownload = (st === "missing" && semanticAutoDownload) || st === "failed";
+            return S.jsxs("div", { style: { marginTop: 6 }, children: [
+              S.jsxs("div", { style: row, children: [
+                S.jsx("label", { style: labelStyle, children: "嵌入模型" }),
+                S.jsxs("div", { style: { flex: 1, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }, children: [
+                  S.jsx("span", { style: { fontSize: 13, color: tone, fontWeight: st === "ready" ? 500 : 400 }, children: text }),
+                  canDownload ? S.jsx("button", {
+                    type: "button",
+                    disabled: modelBusy || st === "loading",
+                    onClick: () => {
+                      setModelBusy(true);
+                      Promise.resolve().then(() => runtime.downloadModel())
+                        .catch(() => {})
+                        .finally(() => {
+                          // 下载在后台跑，这里只是把按钮解锁；进度靠轮询反映
+                          setTimeout(() => setModelBusy(false), 800);
+                        });
+                    },
+                    style: { padding: "2px 10px", fontSize: 12, cursor: modelBusy ? "default" : "pointer" },
+                    children: st === "failed" ? "重试" : "下载",
+                  }) : null,
+                  mdl.state === "loading" ? S.jsx("span", { style: { fontSize: 12, color: "var(--dsw-alias-label-secondary)" }, children: `${fmtB(mdl.downloaded || 0)} / ${fmtB(mdl.total || 0)} · 源 ${mdl.host || "huggingface.co"}` }) : null,
+                ] }),
+              ] }),
+              // 下载中才画进度条，其他状态不占纵向空间
+              st === "loading" ? bar(mdl.percent || 0, false) : null,
+              // 就绪时把实际路径露出来 —— 排查「到底用的哪个文件」时这是唯一线索
+              st === "ready" && mdl.path ? S.jsx("div", { style: { fontSize: 11, color: "var(--dsw-alias-label-secondary)", marginTop: 2, wordBreak: "break-all" }, children: mdl.path }) : null,
+              st === "missing" && !semanticAutoDownload ? S.jsx("div", { style: { fontSize: 12, color: "var(--dsw-alias-state-error-primary, #d33)", marginTop: 4 }, children: "自动下载已关闭。把模型文件放进 ~/.node-llama-cpp/models，或用 DSH_VEC_MODEL 指定路径。" }) : null,
+            ] });
+          })(),
+          semanticEnabled ? S.jsxs("div", { style: { marginTop: 8 }, children: [
+            S.jsxs("div", { style: row, children: [
+              S.jsx("label", { style: labelStyle, children: "自动注入" }),
+              S.jsxs("label", { style: { display: "flex", alignItems: "center", gap: 6, cursor: writable ? "pointer" : "default" }, children: [
+                S.jsx("input", { type: "checkbox", checked: semanticAutoInject, disabled: !writable, onChange: (e) => setSemanticAutoInject(e.target.checked) }),
+                S.jsx("span", { style: hint, children: "每轮对话自动检索相关记忆并注入；关掉则只索引不注入" }),
+              ] }),
+            ] }),
+            S.jsxs("div", { style: row, children: [
+              S.jsx("label", { style: labelStyle, children: "同步间隔" }),
+              S.jsx("input", { type: "number", min: 1, step: 1, value: semanticIntervalMin, disabled: !writable, onChange: (e) => setSemanticIntervalMin(Math.max(1, Number(e.target.value) || 10)), style: { ...inputStyle, maxWidth: 120 } }),
+              S.jsx("span", { style: hint, children: "分钟；索引追平后按此间隔检查新消息" }),
+            ] }),
+            S.jsxs("div", { style: row, children: [
+              S.jsx("label", { style: labelStyle, children: "相似度下限" }),
+              S.jsx("input", { type: "number", min: 0, max: 1, step: 0.01, value: semanticMinScore, disabled: !writable, onChange: (e) => setSemanticMinScore(Math.min(1, Math.max(0, Number(e.target.value) || 0.62))), style: { ...inputStyle, maxWidth: 120 } }),
+              S.jsx("span", { style: hint, children: "0–1，低于此分的命中被丢弃；实测中位数约 0.70" }),
+            ] }),
+            S.jsxs("div", { style: row, children: [
+              S.jsx("label", { style: labelStyle, children: "返回条数" }),
+              S.jsx("input", { type: "number", min: 1, max: 20, step: 1, value: semanticTopK, disabled: !writable, onChange: (e) => setSemanticTopK(Math.min(20, Math.max(1, Number(e.target.value) || 6))), style: { ...inputStyle, maxWidth: 120 } }),
+              S.jsx("span", { style: hint, children: "条，合并后最多返回多少条" }),
+            ] }),
+            S.jsxs("div", { style: row, children: [
+              S.jsx("label", { style: labelStyle, children: "向量权重" }),
+              S.jsx("input", { type: "number", min: 0, max: 1, step: 0.05, value: semanticVectorWeight, disabled: !writable, onChange: (e) => setSemanticVectorWeight(Math.min(1, Math.max(0, Number(e.target.value) || 0.7))), style: { ...inputStyle, maxWidth: 120 } }),
+              S.jsx("span", { style: hint, children: "0–1，其余权重自动分给关键词；两路都归一后加权" }),
+            ] }),
+            S.jsxs("div", { style: row, children: [
+              S.jsx("label", { style: labelStyle, children: "片段长度" }),
+              S.jsx("input", { type: "number", min: 50, step: 10, value: semanticMaxSnippetChars, disabled: !writable, onChange: (e) => setSemanticMaxSnippetChars(Math.max(50, Number(e.target.value) || 200)), style: { ...inputStyle, maxWidth: 120 } }),
+              S.jsx("span", { style: hint, children: "字，注入时每条截断到这个长度" }),
+            ] }),
+          ] }) : null,
         ] }),
-        S.jsxs("div", { style: row, children: [
-          S.jsx("label", { style: labelStyle, children: "单轮上限" }),
-          S.jsx("input", { type: "number", min: 1, step: 100, value: maxPerTurn, disabled: !writable, onChange: (e) => setMaxPerTurn(Number(e.target.value) || 2000), style: { ...inputStyle, maxWidth: 160 } }),
-          S.jsx("span", { style: hint, children: "条，单轮最多入库多少条" }),
-        ] }),
-        S.jsxs("div", { style: row, children: [
-          S.jsx("label", { style: labelStyle, children: "落库日志" }),
-          S.jsxs("label", { style: { display: "flex", alignItems: "center", gap: 6, cursor: writable ? "pointer" : "default" }, children: [
-            S.jsx("input", { type: "checkbox", checked: memoryVerbose, disabled: !writable, onChange: (e) => setMemoryVerbose(e.target.checked) }),
-            S.jsx("span", { style: hint, children: "关掉只保留错误日志" }),
+        S.jsxs("details", { style: groupBox, children: [
+          S.jsx("summary", { style: groupSummary, children: "对话沉淀" }),
+          S.jsxs("div", { style: row, children: [
+            S.jsx("label", { style: labelStyle, children: "启用" }),
+            S.jsxs("label", { style: { display: "flex", alignItems: "center", gap: 6, cursor: writable ? "pointer" : "default" }, children: [
+              S.jsx("input", { type: "checkbox", checked: nudgeEnabled, disabled: !writable, onChange: (e) => setNudgeEnabled(e.target.checked) }),
+              S.jsx("span", { style: hint, children: "对话进行中把值得记的抄进 memory/daily，只写草稿层" }),
+            ] }),
           ] }),
-        ] }),
-        S.jsxs("div", { style: row, children: [
-          S.jsx("label", { style: labelStyle, children: "梦境提炼" }),
-          S.jsxs("label", { style: { display: "flex", alignItems: "center", gap: 6, cursor: writable ? "pointer" : "default" }, children: [
-            S.jsx("input", { type: "checkbox", checked: dreamingEnabled, disabled: !writable, onChange: (e) => setDreamingEnabled(e.target.checked) }),
-            S.jsx("span", { style: hint, children: "每晚从 daily 提炼到 MEMORY.md / USER.md" }),
+          S.jsxs("div", { style: row, children: [
+            S.jsx("label", { style: labelStyle, children: "触发轮数" }),
+            S.jsx("input", { type: "number", min: 1, step: 1, value: nudgeTurnThreshold, disabled: !writable || !nudgeEnabled, onChange: (e) => setNudgeTurnThreshold(Number(e.target.value) || 10), style: { ...inputStyle, maxWidth: 160 } }),
+            S.jsx("span", { style: hint, children: "轮，累计多少轮对话沉淀一次" }),
           ] }),
-        ] }),
-        S.jsx("div", { style: groupTitle, children: "对话沉淀" }),
-        S.jsxs("div", { style: row, children: [
-          S.jsx("label", { style: labelStyle, children: "启用" }),
-          S.jsxs("label", { style: { display: "flex", alignItems: "center", gap: 6, cursor: writable ? "pointer" : "default" }, children: [
-            S.jsx("input", { type: "checkbox", checked: nudgeEnabled, disabled: !writable, onChange: (e) => setNudgeEnabled(e.target.checked) }),
-            S.jsx("span", { style: hint, children: "对话进行中把值得记的抄进 memory/daily，只写草稿层" }),
+          S.jsxs("div", { style: row, children: [
+            S.jsx("label", { style: labelStyle, children: "最小间隔" }),
+            S.jsx("input", { type: "number", min: 1, step: 1, value: nudgeMinGapMin, disabled: !writable || !nudgeEnabled, onChange: (e) => setNudgeMinGapMin(Number(e.target.value) || 5), style: { ...inputStyle, maxWidth: 160 } }),
+            S.jsx("span", { style: hint, children: "分钟，同一会话两次沉淀之间至少隔这么久" }),
           ] }),
-        ] }),
-        S.jsxs("div", { style: row, children: [
-          S.jsx("label", { style: labelStyle, children: "触发轮数" }),
-          S.jsx("input", { type: "number", min: 1, step: 1, value: nudgeTurnThreshold, disabled: !writable || !nudgeEnabled, onChange: (e) => setNudgeTurnThreshold(Number(e.target.value) || 10), style: { ...inputStyle, maxWidth: 160 } }),
-          S.jsx("span", { style: hint, children: "轮，累计多少轮对话沉淀一次" }),
-        ] }),
-        S.jsxs("div", { style: row, children: [
-          S.jsx("label", { style: labelStyle, children: "最小间隔" }),
-          S.jsx("input", { type: "number", min: 1, step: 1, value: nudgeMinGapMin, disabled: !writable || !nudgeEnabled, onChange: (e) => setNudgeMinGapMin(Number(e.target.value) || 5), style: { ...inputStyle, maxWidth: 160 } }),
-          S.jsx("span", { style: hint, children: "分钟，同一会话两次沉淀之间至少隔这么久" }),
         ] }),
         S.jsxs("div", { style: { marginTop: 14, display: "flex", gap: 8 }, children: [
-          S.jsx("button", { type: "button", disabled: !writable, onClick: save, style: { padding: "6px 14px", borderRadius: 8, cursor: writable ? "pointer" : "default", fontWeight: 500 }, children: saved ? "✓ 已保存" : "保存" }),
-          S.jsx("button", { type: "button", disabled: !writable, onClick: () => setLoadTick((t) => t + 1), style: { padding: "6px 14px", borderRadius: 8, cursor: writable ? "pointer" : "default" }, children: "放弃修改" }),
+        S.jsx("button", { type: "button", disabled: !writable, onClick: save, style: { padding: "6px 14px", borderRadius: 8, cursor: writable ? "pointer" : "default", fontWeight: 500 }, children: saved ? "✓ 已保存" : "保存" }),
+        S.jsx("button", { type: "button", disabled: !writable, onClick: () => setLoadTick((t) => t + 1), style: { padding: "6px 14px", borderRadius: 8, cursor: writable ? "pointer" : "default" }, children: "放弃修改" }),
         ] }),
       ] });
     }
@@ -559,6 +847,14 @@ window.__ModuleLoader__.load({
       const setConfig = (payload) => callRemote("setConfig", payload);
       const listProviders = () => callRemote("listProviders");
       const listModels = (payload) => callRemote("listModels", payload);
+
+      /*
+       * runtime 必须在这里就创建 —— 设置页（settings.section）也要用它读
+       * vectorStatus，看模型是否就绪。原来它创建在下面页面注册之前，
+       * 设置页拿不到，模型状态就画不出来。
+       */
+      const runtime = createDreamingRuntime(ctx.connection.rpc);
+
       ctx.slots.inject("settings.section", () =>
         ctx.slots.register(
           {
@@ -566,9 +862,10 @@ window.__ModuleLoader__.load({
             id: "dreaming",
             order: 26,
             label: () => "梦境记忆",
-            inject: () => ({ getConfig, setConfig, listProviders, listModels }),
+            inject: () => ({ getConfig, setConfig, listProviders, listModels, runtime }),
           },
-          DreamSettings,
+          // 用错误边界包一层：组件抛异常时把报错印在页面上，而不是整块消失
+          (props) => S.jsx(SectionBoundary, { children: S.jsx(DreamSettings, props) }),
         ),
       );
 
@@ -578,9 +875,7 @@ window.__ModuleLoader__.load({
       //   ② sidebar.panellist —— 左侧菜单项，用 id 关联。
       // 两处共用同一个 id "dreaming"（页面写 key、菜单写 id），点菜单即切到该页面。
       // 注：原 conversation.view Tab 已移除 —— 同一功能不再重复占用会话页。
-      // runtime 不再按 sessionId 缓存：createDreamingRuntime 本就不使用 sessionId
-      // （RPC 通道 "/dsh-dreaming" 与会话无关），独立页面也没有会话上下文。
-      const runtime = createDreamingRuntime(ctx.connection.rpc);
+      // runtime 已在上面创建（设置页共用同一个实例，不重复构造）。
       const PAGE_ID = "dreaming";
 
       ctx.slots.inject("main", () =>

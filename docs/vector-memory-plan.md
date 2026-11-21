@@ -138,6 +138,7 @@ CREATE TABLE IF NOT EXISTS vec_state (
 );
 INSERT OR IGNORE INTO vec_state(key, value) VALUES
   ('watermark_id', '0'),
+  ('hot_max_id', '0'),      -- 第 1 趟（近期）已覆盖到的最大 id；0 = 未做
   ('model', 'embeddinggemma-300m-q8'),
   ('dim', '768');
 
@@ -216,14 +217,42 @@ pauseSchedule()  { clearTimeout(this._timer); this._timer = null; }   // 开关�
 **`syncOnce()` 流程：**
 
 ```
-① 取 watermark
-② SELECT 新消息（条件见第五节）
-③ 逐条 slice(0,3000) → 子进程 embed → INSERT messages_vec
-④ 每 100 条推进一次 watermark（崩溃后只重算一小段）
-⑤ 全部完成 → watermark = max(id)
+① 若 hot_max_id == 0（从未建过）→ 先跑第 1 趟（近期优先），见下
+② 取 watermark
+③ SELECT 新消息（条件见第五节）
+④ 逐条 slice(0,3000) → 子进程 embed → INSERT messages_vec
+⑤ 每 100 条推进一次 watermark（崩溃后只重算一小段）
+⑥ 全部完成 → watermark = max(id)
 ```
 
-**每 100 条推进一次** —— 中途崩溃最多重算 100 条（约 33 秒），不会从头再来。
+**每 100 条推进一次** —— 中途崩溃最多重算 100 条，不会从头再来。
+
+### 两趟建库：近期优先
+
+**全量按 `id` 正序建有个大问题：`id` 小的 = 旧消息，建到 50% 时索引的是
+最早那一半，最新的反而一条都没有。而检索最常要的恰恰是近期记忆。**
+
+**所以首次建库分两趟：**
+
+```
+第 1 趟（warm up）  最近 20% 的消息，上限 5000 条
+                   SELECT ... ORDER BY id DESC LIMIT min(maxId * 0.2, 5000)
+                   完成后写 hot_max_id = 本趟覆盖的最小 id，
+                   并用 watermark 跳到「第 1 趟覆盖范围之前」，
+                   使第 2 趟自然跳过已建的部分
+第 2 趟（full）     剩下的从旧往新建，正序推进 watermark
+```
+
+**20% 与 5000 都是比例/上限，不是绝对条数** —— 小库（1000 条）取 200 条，
+大库（100 万条）取 5000 条封顶。**公共插件不能写死绝对条数。**
+
+**收益：前约 15% 的时间就能让近期记忆可用**，而不是等到全部建完。
+全量索引在慢机器上可能要数小时，这个差别是「能不能用」的差别。
+
+**代价：多一个 `hot_max_id` 状态字段，`phase` 多一档 `warming`。**
+
+**第 1 趟不推进 `watermark`** —— 水位线的语义保持"连续覆盖到哪"不被破坏。
+第 2 趟开始时把 `watermark` 设为第 1 趟覆盖的最小 id 减 1，两者拼起来正好无缝。
 
 ---
 
@@ -306,6 +335,33 @@ score = (vw * e.vec + tw * e.txt) / denom;
 
 **OpenClaw 没有这一步**（`manager:402-445`）——它靠 0.7/0.3 的权重让
 `0.7 × 0.68 = 0.478 > 0.35` 侥幸不触发，是**避开**不是**解决**。
+
+### 单路命中必须按单路归一（否则一半结果直接失效）
+
+**上面那个 `denom` 只解决"整个池子没有关键词分"，解决不了"某一条只有一路分"。**
+
+朴素加权下：
+
+```
+某条只有关键词命中（向量还没有它）：
+  score = 0.7 × 0 + 0.3 × txt = 0.3 × txt     最高 0.3
+  minScore = 0.62
+  → 永远过不了阈值
+```
+
+**这不是边缘情况**：任何消息**刚入库、还没被索引进程处理**的那几分钟，就处于这个状态。
+索引建立期间更是**大部分消息**都处于这个状态。
+
+**修正 —— 按实际有分的路归一：**
+
+```js
+let score;
+if (e.vec > 0 && e.txt > 0)      score = (vw * e.vec + tw * e.txt) / 1;
+else if (e.vec > 0)              score = e.vec;
+else if (e.txt > 0)              score = e.txt;
+```
+
+**副作用是"强关键词命中会排到前面"** —— 这是对的，字面完全匹配本就该优先于弱语义相似。
 
 ### 三条抑制规则
 
@@ -410,19 +466,35 @@ readonly text: string | ((context: AssembleContext) => string);
 
 ## 九、配置
 
+**实现用的是平铺字段**（`semanticEnabled` 这一组），不是嵌套的 `memorySearch.semantic`。
+理由：与插件里已有的 8 个记忆配置项同风格，`.volatile()` 热改路径已验证可用，
+设置页 `save()` 的字段列表也不用做嵌套展开。下面按分组列，字段名就是真实键名。
+
 ```yaml
-memorySearch:
-  semantic:
-    enabled: false          # ① 总开关，默认关
-    autoInject: true        # ② 自动注入，enabled 打开时默认 true
-    intervalMinutes: 10     # 增量索引频率
-    minScore: 0.62
-    # ── 高级参数（设置页折叠）──
-    candidatePool: 24
-    topK: 6
-    vectorWeight: 0.7       # ← textWeight 恒为 1 - 此值，不单独配置
-    maxSnippetChars: 200
+# ① 总开关
+semanticEnabled: false         # 关掉则完全不加载 vec0、不启嵌入子进程
+# ② 自动注入（仅 semanticEnabled 为真时有效）
+semanticAutoInject: true       # 关掉 = 只索引不注入
+# ③ 节奏
+semanticIntervalMin: 10        # 增量索引间隔（分钟）
+# ④ 质量
+semanticMinScore: 0.62
+semanticCandidatePool: 24
+semanticTopK: 6
+semanticVectorWeight: 0.7      # ← textWeight 恒为 1 - 此值，不单独配置
+semanticMaxSnippetChars: 200
 ```
+
+**三级开关：**
+
+| semanticEnabled | semanticAutoInject | 行为 |
+|---|---|---|
+| false | — | 完全关闭，与加此功能前一致 |
+| true | false | 只索引不注入（`memory_search` 能用向量，prompt 里不出现） |
+| true | true | 全开 |
+
+数值配置全部走 `numCfg()` 兜底：非法值（NaN / 超范围）一律回落默认，
+**公共插件不能因为填了脏数据就崩**。
 
 **`textWeight` 不单独暴露，恒为 `1 - vectorWeight`** —— 两个权重独立填时，
 若用户填 `0.3 / 0.3`，总分整体缩到 0.6 倍，**所有结果被 minScore 静默误杀**，
@@ -460,6 +532,86 @@ applySemanticMemory(ctx, cfg.memorySearch?.semantic, log);   // 在 applyPromptI
 ---
 
 ## 十一、必须记住的坑
+
+### ⓪ `distance_metric=cosine` 必须显式写（2026-11-21 实测踩的）
+
+**这是整轮实现里最贵的一个坑，而且不报错。**
+
+`vec0` 建表默认用 **L2 平方距离**。而 `node-llama-cpp` 的 `getEmbeddingFor()`
+返回的向量**没有归一化** —— 实测模长 **28.49**（768 维）。
+
+后果：
+
+```
+L2 距离实测 25.29
+score = 1 - dist = 1 - 25.29 = -24.29
+```
+
+**所有分数变成负数，`minScore=0.62` 一条都过不了 → 检索永远返回空。
+不抛异常、不写日志，看起来像「库里没有相关内容」。**
+
+建表时显式指定：
+
+```sql
+CREATE VIRTUAL TABLE messages_vec USING vec0(
+  id INTEGER PRIMARY KEY,
+  embedding FLOAT[768] distance_metric=cosine
+);
+```
+
+改后 `distance = 1 - cos_sim ∈ [0, 2]`，`1 - dist` 直接就是余弦相似度。
+
+**验算（同一向量 / 相近 / 相反）：**
+
+| 输入 | cos_dist | 说明 |
+|---|---|---|
+| 自身 | 0.000000 | ✓ |
+| 相邻一维 | 0.001554 | ✓ |
+| 取反 | 2.000000 | ✓ 余弦距离上界 |
+
+**为什么之前的试验脚本没暴露**：那版借用 openclaw 的 llama provider，向量是归一化过的；
+换成项目内的 `node-llama-cpp@3.19.0` 后行为变了。**换了嵌入实现必须重验距离度量。**
+
+`vec_state` 里记 `metric=cosine`，指纹校验会拒绝复用 L2 建的旧库。
+
+### ⓪′ 向量命中不带正文，必须回查
+
+`queryKnn()` 只返回 `{id, dist}` —— 没有 `content`、`session_id`。
+直接喂给 `mergeHybrid` 会得到「分数正确、片段全空」的结果，且**回声抑制也失效**
+（它依赖 `sessionId` 判当前会话）。
+
+所以 `mergeHybrid` 加了 `fetchRows` 回调：
+
+```js
+mergeHybrid({
+  vecHits,
+  fetchRows: (ids) => V.getMessagesByIds(db.db, ids),   // 只回查还没正文的那部分
+  ...
+})
+```
+
+回查放在**回声抑制之前** —— 顺序反了就等于没排除。
+
+### ⓪″ `hot_max_id` 只能在第 1 趟**完整跑完**后写
+
+`hot_max_id = H` 的语义是「**id > H 的都已有向量**」。
+
+第 1 趟按 `--limit` 截断或中途 Ctrl-C 时，只建了最近 N 条，中间一大段还没建。
+此时若照写，那一段会被标记成「已覆盖」而**永远不会补**。
+
+实测：`--limit 50` 时 `hot_max_id=40011`，而只建了 40,012..40,228 ——
+**中间 8,751 条被静默漏掉**。
+
+```js
+const warmComplete = warmSlice.length === warmRows.length;
+if (warmComplete) {
+  hotMax = warmRows[0].id - 1;
+  V.setHotMaxId(db, hotMax);
+} else {
+  log("第 1 趟中断，不写 hot_max_id，下次重跑");
+  throw { done: true };
+}
+```
 
 ### ① BigInt
 

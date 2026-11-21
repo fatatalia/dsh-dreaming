@@ -1,14 +1,19 @@
 # dsh-dreaming — 梦境记忆
 
-dsh 的记忆整合插件。三件事，彼此独立、可单独关掉：
+dsh 的记忆整合插件。四件事，彼此独立、可单独关掉：
 
 | 模块 | 什么时候跑 | 干什么 | 产物 |
 |---|---|---|---|
 | **梦境** | 每天凌晨随机窗口一次（默认 02:00–04:30） | 把当天素材写成一篇梦，再把高价值结论晋升回长期记忆 | `dreams` + `promotions` 表，`MEMORY.md` |
 | **对话沉淀** | 对话进行中，每累计 N 轮一次 | 把这段对话里以后还有用的东西抄成草稿 | 各工作区 `memory/daily/YYYY-MM-DD.md` |
 | **记忆注入** | 每轮 model 调用 | 把长期记忆送进 system prompt | 无（纯注入） |
+| **语义检索** | 后台常驻，分批推进 | 给历史对话建向量索引，按语义找回相关片段 | `messages_vec`（sqlite-vec 虚表）+ `vec_state` |
 
 设计上有一条主线：**LLM 只负责写和提炼，判定交给规则。** 值不值得晋升不是让模型自己说，而是看这条结论在后续对话里被"想起"了几次。
+
+前三个模块只用 FTS/子串，**零外部依赖**；语义检索需要嵌模型（313 MB），
+但它是可选件 —— 关掉行为和原来完全一致，不会因为它缺模型而影响其他三条路。
+
 
 ---
 
@@ -94,7 +99,15 @@ dsh-dreaming/
 │   ├── extract.mjs          # 素材提取与碎片化
 │   ├── curate.mjs           # 洞察候选筛选
 │   ├── dream-render.mjs     # 渲染
-│   └── agent-setup.mjs      # agent 装配
+│   ├── agent-setup.mjs      # agent 装配
+│   ├── vec-model.mjs        # 嵌入模型解析 / 校验 / 下载（父进程侧）
+│   ├── vec-embed.mjs        # 嵌入客户端（管子进程生命周期）
+│   ├── vec-embed-child.mjs  # 嵌入子进程（独占 llama.cpp 上下文）
+│   ├── vec-store.mjs        # vec0 虚表读写 / 游标 / KNN
+│   ├── vec-sync.mjs         # 后台同步器（第 1 趟近期 + 第 2 趟历史 + 增量）
+│   ├── vec-hybrid.mjs       # 向量 + 文本混合打分
+│   └── vec-inject.mjs       # 语义记忆注入（每轮检索 + 拼 prompt）
+├── scripts/                 # 运维脚本（回填 / 体检）
 ├── test/v2-unit.test.mjs
 ├── docs/
 │   ├── v2-plan.md
@@ -110,8 +123,89 @@ dsh-dreaming/
 - `promotions` — 晋升结论 + `evidence`（来源/命中数/实体）+ `rule`（触发的信号名）
 - `recall_stats` — 跨天「被想起」统计：命中次数、不同通道数、首见与最近命中日期、是否已晋升
 - `sessions` — 对话落库（供素材召回与检索）
+- `messages_vec` — 语义向量（`vec0` 虚表，`distance_metric=cosine`，768 维）
+- `vec_state` — 索引游标：`watermark_id`（增量水位）、`hot_max_id`（第 1 趟上界）、
+  `warm_floor_id` / `warm_cursor_id`（近期段下边界与进度）、`model` / `dim` / `metric`（模型指纹）
 
 **`MEMORY.md`** — `~/.dsh/MEMORY.md`，只追加 `## YYYY-MM-DD — 梦境沉淀（dsh-dreaming）` 段。
+
+---
+
+## 语义检索（向量）
+
+文本检索只在**字面**上找词，问「上次那个温度的问题」就找不到写着「CPU 76°C」的对话。
+语义检索补这一块：把消息嵌成 768 维向量，按**意思**找。**默认关闭**，关掉时行为与原来完全一致。
+
+### 嵌入模型：怎么来的
+
+模型不随 npm 包分发（313 MB），而是**首次用到时自动下载**到
+`~/.node-llama-cpp/models/`（`node-llama-cpp` 的标准缓存目录）。解析顺序：
+
+| 优先级 | 来源 | 行为 |
+|---|---|---|
+| 1 | 环境变量 `DSH_VEC_MODEL` | 指向哪个文件就用哪个。**无效时直接报错，不自动下载** —— 显式指定的路径出错必须让人看见 |
+| 2 | `semanticModelDir` / `semanticModelFile` 配置 | 同上 |
+| 3 | 默认目录下的默认文件名 | 命中即用 |
+| 4 | 都不存在，且 `semanticAutoDownload = true` | 从 `hf:<repo>/<file>` 下载 |
+| 5 | 都不存在，且 `semanticAutoDownload = false` | 停在 `missing`，等人来点 |
+
+下载走 `HF_ENDPOINT` 环境变量（hf-mirror 直接生效，**不做自动猜镜像** —— 静默回退会让人查不出问题）。
+界面会显示当前用的 host。
+
+**三道校验**（半截文件是常态：HF 404 会返回一小段文本、断网会留 `.part`）：
+
+1. 文件大小 ≥ 50 MB（正常模型 313 MB）
+2. 前 4 字节必须是 `GGUF` magic
+3. 下载时 `verify: true`，比对远端 Content-Length
+
+任何一道不过 ⇒ 重命名成 `<原名>.corrupt-<ISO时间戳>`**保留现场不删**，然后重下。
+保留是因为「坏成什么样」本身就是线索 —— 15 字节的那种一眼就能看出是 404 页面。
+
+### 索引：三趟推进
+
+| 趟 | 范围 | 方向 | 游标 |
+|---|---|---|---|
+| 第 1 趟 | 最近 20%（上限 5000 条） | 由新到旧 | `warm_cursor_id` **递减** |
+| 第 2 趟 | `id ≤ hot_max_id` 的历史 | 由旧到新 | `watermark_id` 递增 |
+| 增量 | 水位线之后的新消息 | 由旧到新 | 同上 |
+
+⚠️ **第 1 趟的游标是递减的** —— 它从最新往旧推，看到游标变小是正常的，不是死循环。
+判断「有没有推进」要看**是否触及 `warm_floor_id`**，别只看数字方向。
+
+`hot_max_id` 在**第 1 趟收尾时**才写（= `warm_floor_id - 1`），所以它长期是 0 属正常 ——
+说明第 1 趟还没跑完。第 2 趟的上界靠它，`watermark_id` 则必须留 0，
+否则第 2 趟就再也取不到历史部分。
+
+**分批与预算**：每批 `CHUNK` 条嵌入 + 事务写，`TICK_BUDGET_MS` 到点就停，下轮继续。
+积压时用 `CATCHUP_MS` 短间隔追平，追平后回到 `intervalMs`。
+
+### 混合打分
+
+向量召回 `semanticCandidatePool`（默认 24）条候选，再与文本命中按权重融合：
+
+```
+score = vectorWeight × 余弦相似度 + (1 - vectorWeight) × 文本得分
+```
+
+`semanticVectorWeight` 默认 0.7。**文本权重恒为 `1 - vectorWeight`**，不单独暴露 ——
+两个都让人调容易调成 1.5 或 0.3，没意义。
+
+### 注入
+
+每轮 model 调用前检索一次，命中的片段拼在最后一条 user 消息**之后**
+（放前面会让 prompt cache 前缀全失效）。门槛 `semanticMinScore` 默认 0.62，
+最多 `semanticTopK` 条，单条截断 `semanticMaxSnippetChars`。
+注入内容带来源标注（会话 / 时间），不会与 `MEMORY.md` 的注入混在一起。
+
+### 实测性能（MacBookPro14,1 / i7-7660U / 2 物理核）
+
+| 场景 | 嵌入 | KNN | 合计 |
+|---|---|---|---|
+| 索引空闲 | 166–190 ms | 3–6 ms | 169–194 ms |
+| 索引运行中 | ~1054 ms | ~6 ms | ~1060 ms |
+| 模型冷启动 | — | — | 2617 ms |
+
+索引满载时注入会慢到 1 秒。**接受，不优化**（2 核机器上拆进程或加避让延迟只会让索引更慢）。
 
 ---
 
@@ -307,7 +401,19 @@ INSERT INTO messages_fts_trigram(messages_fts_trigram, rowid, content)
 2. **晋升沉淀** — 历史晋升记录 + 证据链
 3. **记忆注入** — 只读快照：MEMORY.md 与各工作区 USER.md 的字节数、预算占用、是否截断、当前冻结了哪些会话，正文可展开
 
-**设置页（Settings → 梦境记忆）** — 窗口时间、模型、梦境开关、对话沉淀开关/轮数/间隔。
+**设置页（Settings → 梦境记忆）** — 窗口时间、模型、梦境开关、对话沉淀开关/轮数/间隔、语义检索全部参数。
+
+语义检索区块顶部有一行**模型状态**（只读，来自 `vectorStatus.model`，与配置项无关）：
+
+| 状态 | 显示 | 可操作 |
+|---|---|---|
+| `missing` | `未找到模型` + 下载来源 | 「下载」按钮（`semanticAutoDownload=false` 时改为提示去开开关） |
+| `loading` | `下载中 47% · 1.1 MB/s` + 进度条 | — |
+| `ready` | `✓ 已就绪 · 313MB` + 文件路径 | 失败时可「重试」 |
+| `failed` | 错误码 + 原因 | 「重试」按钮 |
+
+`loading` 期间**索引绝不启动** —— 半截模型嵌出来的向量是垃圾，污染索引比没有索引更糟。
+进度必须显示百分比和速度：313 MB 在慢网上要五分钟，只转圈会让人以为卡死。
 
 **RPC 通道** `/dsh-dreaming`（`connection.rpc.handle`，`authority: trusted`）：
 
@@ -318,6 +424,8 @@ INSERT INTO messages_fts_trigram(messages_fts_trigram, rowid, content)
 | `runNow` | 立即做梦 |
 | `status` | 运行状态与下次排程 |
 | `memoryStatus` | 注入层快照（只读，不触碰冻结缓存） |
+| `vectorStatus` | 语义索引状态：进度、游标、命中统计 + `model` 子对象（四态） |
+| `downloadModel` | 后台触发模型下载（未启用语义检索时直接返回 `started:false`） |
 
 `getConfig` / `setConfig` / `listProviders` / `listModels` 走 Typert remote（`remote.dreaming`），不是这条通道。
 
@@ -343,6 +451,22 @@ INSERT INTO messages_fts_trigram(messages_fts_trigram, rowid, content)
 | `storeReasoning` | `false` | 是否把 reasoning 也入库（体积大） | — |
 | `maxPerTurn` | `2000` | 单 turn 入库条数上限 | — |
 | `memoryVerbose` | `true` | 落库与检索日志详细程度 | — |
+| `semanticEnabled` | `false` | 语义检索总开关。关掉时其他三条路完全不变 | ✓ |
+| `semanticAutoInject` | `true` | 每轮自动注入命中的片段 | ✓ |
+| `semanticIntervalMin` | `10` | 追平后的增量同步间隔（分钟） | ✓ |
+| `semanticMinScore` | `0.62` | 注入门槛，低于此分不注入 | ✓ |
+| `semanticCandidatePool` | `24` | 向量召回候选数，再与文本融合 | ✓ |
+| `semanticTopK` | `6` | 最终注入条数上限 | ✓ |
+| `semanticVectorWeight` | `0.7` | 混合打分里向量的权重（文本恒为 `1-w`） | ✓ |
+| `semanticMaxSnippetChars` | `200` | 单条片段截断长度 | ✓ |
+| `semanticAutoDownload` | `true` | 缺模型时是否自动下载 | ✓ |
+| `semanticModelDir` | 缓存目录 | 模型所在目录 | — |
+| `semanticModelRepo` | `ggml-org/embeddinggemma-300m-qat-q8_0-GGUF` | 下载源仓库 | — |
+| `semanticModelFile` | `embeddinggemma-300m-qat-Q8_0.gguf` | 下载源文件名 | — |
+
+⚠️ **加配置字段要改三处**，缺一处就是静默故障：
+① `Config` schema ② `setConfig` 白名单 ③ **`scope.get()` 的手写白名单**
+（第 ③ 处最容易漏 —— 它只影响 `getConfig` 的回传，表现为设置页永远显示默认值，全程零报错）
 
 代码内另有几处常量（改动需重启）：注入预算 `MAX_TOTAL_BYTES = 10 KB`（`lib/inject.mjs`）、MEMORY 预算 `DEFAULT_MEMORY_BUDGET_BYTES = 10 KB`、晋升阈值（`PROMOTION_MIN_RECALL_COUNT=2` / `CANDIDATE_CONFIDENCE=0.45` / `PROMOTION_MAX_PER_NIGHT=5` / `DEDUPE_THRESHOLD=0.85`）。
 
@@ -365,6 +489,26 @@ npx esbuild client.js --loader:.js=jsx --outfile=/dev/null
 [dr] 记忆注入层：会话 <id> 首次注入 MEMORY <n>B + USER <n>B（cwd=…）
 ```
 
+语义检索开着时还应看到：
+
+```
+[dr] 嵌入模型已就绪：<路径>（313MB）
+[dr] 语义索引写入 30 条（本批 30，…ms/条）
+[dr] 语义索引第 1 趟完成：近期 <n> 条，hot_max_id=<id>
+[dr] 语义记忆注入：命中 <n> 条，最高分 <s>，注入 <n>B（嵌入 …ms，总计 …ms）
+```
+
+没有「嵌入模型已就绪」而只有别的，说明停在 `missing`/`failed` —— 去设置页看那一行的状态。
+
+直接验模型文件本身（不启动插件）：
+
+```bash
+node --input-type=module -e "
+import { probeModel } from '/Users/fatatalia/project/dsh-dreaming/lib/vec-model.mjs';
+console.log(await probeModel({}));
+"
+```
+
 **注意**：`client.js` 是前端 bundle，服务端重启后**浏览器必须刷新**才会看到改动。判断重启是否真的换了代码，看 `ps -p <pid> -o lstart=` 与文件 mtime 的先后 —— `launchctl kickstart` 返回 abort 时进程往往已经重启了。
 
 ---
@@ -374,7 +518,11 @@ npx esbuild client.js --loader:.js=jsx --outfile=/dev/null
 - **依赖软链**：插件项目要建 `node_modules/@deepseek-ai` → dsh 全局依赖树的软链，否则 import 报 `ERR_MODULE_NOT_FOUND`
 - **`connection.rpc.handle` 必须传第三个参数** `{ authority }`（register 读 `options.authority`，缺省会崩）
 - **`export const inject` 必须含 `"webServer"`**（dsh 0.1.5 起严格检查），漏了报 `cannot get property "webServer" without inject` 并导致插件加载失败
-- **`.volatile()` 字段读出来是 Value 包装**，要用 `.get()`，直接当值用会静默出错
+- **`.volatile()` 字段的形态有两种**：正常写进配置的是裸值；只有解析失败被 autofix 时才会变成
+  `Object.freeze({ get })` 包装器。读它一律用
+  `const v = (x) => (x && typeof x === "object" && typeof x.get === "function" ? x.get() : x)` 包一层 —
+  **直接 `=== true` / `typeof === "string"` 是错的**（2026-11-21 实际栽过：勾选框永远不勾）。
+  更常见的坑是 `scope.get()` 那份手写白名单漏字段，见「配置」章节的 ⚠️
 - **错误信封必须带 `details`**，否则客户端把它重写成 `connection: invalid server-response failure`，原始错误丢失
 - **会话事实在 `session.header`**（`header.cwd` / `header.agentPreset`），不在 `session.meta` —— 后者只在 `agents.create()` 建会话时用
 - **改代码后重启**：`launchctl kickstart -k system/com.dsh.web`（HMR 已禁用）

@@ -7,3 +7,9 @@ node_modules/
 *.orig
 *.tmp
 *.swp
+
+# 2026-11-21 事故防线：本项目的 node_modules/@deepseek-ai 是指向全局 CLI 安装目录的软链。
+# lock 文件会把那些全局路径记成依赖来源，下次 npm install / npm ci 会照着它去 reify
+# 全局目录，把 339 个依赖批量改名成 .包名-随机后缀，瞬间打垮全局 CLI（当天事故现场）。
+# 依赖用 pnpm 或直接在项目里单独装，别用 npm install。
+package-lock.json
