@@ -5,6 +5,9 @@
 >
 > v2 → v3 变更：`minScore` 0.35 → **0.62**（扫了 24 个真实查询的分数分布），
 > 建库候选 14,743 → **14,632**（排除 179 条汇总消息），补三处实测坑。
+>
+> **配套文档：`ui-plan.md`** —— 设置页分组、三级开关、索引进度条、限速与暂停。
+> 本文件讲「怎么实现」，那份讲「界面上怎么用」。
 
 ---
 
@@ -410,15 +413,20 @@ readonly text: string | ((context: AssembleContext) => string);
 ```yaml
 memorySearch:
   semantic:
-    enabled: false          # 总开关，默认关
-    intervalMinutes: 10     # 入库频率
-    topK: 6
-    candidatePool: 24
-    vectorWeight: 0.7
-    textWeight: 0.3
+    enabled: false          # ① 总开关，默认关
+    autoInject: true        # ② 自动注入，enabled 打开时默认 true
+    intervalMinutes: 10     # 增量索引频率
     minScore: 0.62
+    # ── 高级参数（设置页折叠）──
+    candidatePool: 24
+    topK: 6
+    vectorWeight: 0.7       # ← textWeight 恒为 1 - 此值，不单独配置
     maxSnippetChars: 200
 ```
+
+**`textWeight` 不单独暴露，恒为 `1 - vectorWeight`** —— 两个权重独立填时，
+若用户填 `0.3 / 0.3`，总分整体缩到 0.6 倍，**所有结果被 minScore 静默误杀**，
+表现为"检索突然变差了"且不报错。这条必须在代码里强制。
 
 **`enabled: false` 时：**
 
@@ -520,25 +528,37 @@ system      1,903 条  17.23M 字符   均 9,054   ← 76% 字符量，全是重
 - ✅ 24 个真实查询的分数分布扫描
 - ✅ 五组查询的混合配比对比
 
-### 阶段 1：只加查询侧
+### 阶段 1：查询侧（不改任何自动行为）
 
-- 建表 + 触发器 + 水位线
-- `scripts/vec-backfill.mjs` 全量灌一次
-- `memory_search` 内部加向量分支（**手动调用，不自动注入**）
+- `vec-store.mjs`：建表 + 触发器 + 水位线
+- `vec-embed-child.mjs` / `vec-embed.mjs`：子进程嵌入
+- `vec-hybrid.mjs`：混合打分（四条修正全在这）
+- `scripts/vec-backfill.mjs`：全量灌一次
+- `memory_search` 加向量分支（**手动调用，不自动注入**）
 - 验证：同一查询，加向量前后召回对比
 
-**这一阶段不改任何自动行为。出问题删 `messages_vec` 表就回到原状。**
+**出问题删 `messages_vec` 表就回到原状。**
 
-### 阶段 2：加自动注入
+### 阶段 2：索引侧（含界面）
 
-- 上 `agent/pre-step` hook
-- **默认关闭**，配置手动开
+- `vec-sync.mjs`：定时增量 + `status()` / `pause()` / `resume()`
+- `index.js`：switch 加 `vectorStatus` / `vectorPause` / `vectorResume`
+- `client.js`：① 删冻结会话卡 ② 设置页「向量检索」分组 + 首次确认弹窗 ③ 索引状态卡 + 轮询
+
+**顺序不能反** —— 先改前端会拿到 `undefined`，页面直接崩。
+和 11-06 那次「删硬件历史代码连带切掉 `readHardware`」是同一类错误。
+
+**这一阶段能验证索引质量**（页面上直接看进度和条数），
+据此再决定阶段 3 要不要开。
+
+### 阶段 3：自动注入
+
+- `vec-inject.mjs`：`agent/pre-step` + `form: "snapshot"`
+- **默认关闭**（`autoInject: true` 但 `enabled: false`）
 - 开之前测：注入 2–6 条对 prompt 的实际影响（约 +0.5–1.5 KB）
 
-### 阶段 3：定时增量
-
-- 上 `vec-sync.mjs`，10 分钟一次
-- 观察几天：水位线是否正常推进、触发器是否生效
+**依赖顺序：** 阶段 1 能给手动调用 → 阶段 2 能在页面上看见索引 →
+阶段 3 才自动往 prompt 里塞。**前两阶段都可单独回退。**
 
 ---
 
