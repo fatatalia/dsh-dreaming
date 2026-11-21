@@ -706,9 +706,12 @@ window.__ModuleLoader__.load({
               : st === "loading"
                 ? `下载中 ${mdl.percent || 0}% · ${mdl.speedBps ? (mdl.speedBps / 1048576).toFixed(1) : "0"} MB/s`
                 : st === "failed"
-                  ? `不可用：${mdl.error || "未知原因"}`
+                  ? `不可用：${mdl.error || "未知原因"}${noEngine ? "（装好依赖后重启）" : ""}`
                   : `未检测到 · 需要 313MB`;
-            const canDownload = (st === "missing" && semanticAutoDownload) || st === "failed";
+            // no_engine 缺的是 node-llama-cpp，不是模型文件 —— 再下载多少次也没用，
+            // 别给一个按下去必然无效的「重试」按钮。
+            const noEngine = st === "failed" && mdl.errorCode === "no_engine";
+            const canDownload = (st === "missing" && semanticAutoDownload) || (st === "failed" && !noEngine);
             return S.jsxs("div", { style: { marginTop: 6 }, children: [
               S.jsxs("div", { style: row, children: [
                 S.jsx("label", { style: labelStyle, children: "嵌入模型" }),
