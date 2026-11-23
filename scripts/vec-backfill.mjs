@@ -23,6 +23,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import * as V from "../lib/vec-store.mjs";
+import { chunkText } from "../lib/vec-chunk.mjs";
 import { EmbedClient } from "../lib/vec-embed.mjs";
 
 V.setVecRequire(createRequire(import.meta.url));
@@ -131,10 +132,23 @@ async function main() {
 
   /** 处理一批：嵌入 → 事务写向量 + 推进水位线。 */
   const processBatch = async (rows, advanceWatermark) => {
-    const texts = rows.map((r) => r.content);
-    const vectors = await client.embed(texts);
-    if (!vectors) {
-      throw new Error("嵌入失败（子进程无响应）");
+    // 先切分：一条长消息拆成多段，每段单独嵌入（否则一条超限整批全废）
+    const piecesPerMsg = rows.map((r) => {
+      const ps = chunkText(r.content);
+      return ps.length > 0 ? ps : [r.content];
+    });
+    const flat = piecesPerMsg.flat();
+
+    // 分批嵌入：段数会膨胀，不一次全送（否则超时线被拉到几分钟）
+    const vectors = [];
+    const EMBED_BATCH = 40;
+    for (let s = 0; s < flat.length; s += EMBED_BATCH) {
+      const part = flat.slice(s, s + EMBED_BATCH);
+      const got = await client.embed(part);
+      if (!got || got.length !== part.length) {
+        throw new Error("嵌入失败（子进程无响应）");
+      }
+      for (const v of got) vectors.push(v);
     }
 
     const batchStart = Date.now();
@@ -143,12 +157,12 @@ async function main() {
     // 与 dsh 主进程并发写同一个库是安全的 —— 实测 4 秒 27 万次写入零冲突。
     db.exec("BEGIN IMMEDIATE");
     try {
-      // vec0 不支持 INSERT OR REPLACE，必须 delete + insert
-      const del = db.prepare("DELETE FROM messages_vec WHERE id = ?");
-      const ins = db.prepare("INSERT INTO messages_vec(id, embedding) VALUES(?, ?)");
+      // 按段数把 flat 的向量分回每条消息，一次写全部分块
+      let cursor = 0;
       for (let i = 0; i < rows.length; i++) {
-        del.run(BigInt(rows[i].id));
-        ins.run(BigInt(rows[i].id), new Float32Array(vectors[i]));
+        const n = piecesPerMsg[i].length;
+        V.putMessageChunks(db, rows[i].id, vectors.slice(cursor, cursor + n));
+        cursor += n;
       }
       if (advanceWatermark) {
         const maxId = rows[rows.length - 1].id;
